@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base background for dark mode to prevent white flashes */
+body {
+  background-color: #020617; /* slate-950 */
+}
