@@ -1217,7 +1217,19 @@ export default function App() {
             {/* Back */}
             <div className="absolute inset-0 backface-hidden rotate-y-180 rounded-[2.5rem] bg-indigo-600 text-white flex flex-col items-center justify-center p-8 shadow-2xl shadow-indigo-500/30">
               <span className="text-3xl font-bold opacity-80 mb-2">{currentCard.pinyin}</span>
-              <h2 className="text-4xl font-black text-center leading-tight mb-8">{currentCard.meaning}</h2>
+              {currentCard.meaning.includes('|') ? (
+                (() => {
+                  const [direct, expanded] = currentCard.meaning.split('|').map(s => s.trim());
+                  return (
+                    <div className="text-center mb-8">
+                      <h2 className="text-4xl font-black leading-tight mb-2">{direct}</h2>
+                      <p className="text-lg font-medium opacity-75">{expanded}</p>
+                    </div>
+                  );
+                })()
+              ) : (
+                <h2 className="text-4xl font-black text-center leading-tight mb-8">{currentCard.meaning}</h2>
+              )}
               <div className="absolute bottom-0 inset-x-0 p-6 flex gap-3">
                 <button 
                   onClick={(e) => { e.stopPropagation(); markCard('wrong'); }}
