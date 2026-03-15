@@ -12,6 +12,12 @@ Generate your own tocfl practice paragraph based on your difficulty level. You c
 <img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-1.png" />
 <img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-2.png" />
 
+# Conversation Practice Mode
+
+Generate your own tocfl listening practice conversation based on your difficulty level. You can even add your own flashcards to make the conversation more familiar and focused on your practice set! 
+
+<img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-convo-practice-1.png" />
+<img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-convo-practice-2.png" 
 
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
