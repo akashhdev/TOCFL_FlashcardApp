@@ -9,7 +9,7 @@ import {
 
 // --- Configuration ---
 // This is the fallback/system key. 
-const systemApiKey = ""; 
+const systemApiKey = "AIzaSyBh6KOF1JzLV_IGfTHEJWMVTpIZBHxoviM"; 
 
 // --- Initial Data ---
 const INITIAL_DECK = [
@@ -72,8 +72,8 @@ const SoundFX = {
 // --- API Helpers (Modified to accept key) ---
 const callGemini = async (prompt, systemInstruction, key, responseMimeType = "text/plain") => {
   if (!key) return null;
-  // Use standard public model for custom keys, internal preview model for system keys
-  const model = key === systemApiKey ? "gemini-2.5-flash-preview-09-2025" : "gemini-1.5-flash";
+  // Use gemini-3.1-flash-lite-preview for all AI tasks
+  const model = "gemini-3.1-flash-lite-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
   
   const makeRequest = async (retryCount = 0) => {
@@ -90,9 +90,9 @@ const callGemini = async (prompt, systemInstruction, key, responseMimeType = "te
       
       if (!response.ok) {
         const errText = await response.text();
-        // If it's a 404, it might be a model name issue, try fallback to 1.5 flash if using system key failed
-        if (response.status === 404 && model.includes('2.5')) {
-             console.warn("Preview model not found, falling back to 1.5-flash");
+        // If it's a 404, it might be a model name issue, try fallback to 1.5 flash
+        if (response.status === 404 && model.includes('3.1-flash-lite-preview')) {
+             console.warn("3.1 flash lite preview model not found, falling back to 1.5-flash");
              const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
              const fallbackResp = await fetch(fallbackUrl, {
                 method: 'POST',
@@ -163,8 +163,8 @@ const generateImage = async (prompt, key) => {
 
 const generateTTS = async (text, key) => {
   if (!key) return null;
-  // TTS model might also vary by key capability, but we'll try the standard endpoint
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${key}`;
+  // TTS model - using gemini-3.1-flash-lite-preview
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${key}`;
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -317,11 +317,21 @@ export default function App() {
   
   const effectiveKey = customKey || systemApiKey;
 
-  // Mock Test State
-  const [mockConfig, setMockConfig] = useState({ level: 'A1', count: 3, useCurrentDeck: false });
-  const [mockQuestions, setMockQuestions] = useState([]);
-  const [mockLoadingStatus, setMockLoadingStatus] = useState("");
-  const [mockAnswers, setMockAnswers] = useState([]);
+  // Paragraph Practice State
+  const [paragraphConfig, setParagraphConfig] = useState({ level: 'A', length: 'short', useCurrentDeck: false, familiarity: 1, includeQuestions: false });
+  const [paragraphData, setParagraphData] = useState({
+    chinese: "小明每天早上都會喝一杯咖啡。他喜歡在咖啡廳裡看書，感受寧靜的早晨。咖啡的香味讓他覺得很放鬆。有時候他會點一個三明治，跟咖啡一起吃。咖啡廳的老闆娘很親切，總是跟他聊天。小明覺得這是開始新一天最好的方式。",
+    pinyin: "Xiǎo Míng měi tiān zǎo shàng dōu huì hē yī bēi kā fēi. Tā xǐ huān zài kā fēi tīng lǐ kàn shū, gǎn shòu níng jìng de zǎo chén. Kā fēi de xiāng wèi ràng tā jué dé hěn fàng sōng. Yǒu shí hòu tā huì diǎn yī gè sān míng zhì, gēn kā fēi yī qǐ chī. Kā fēi tīng de lǎo bǎn niáng hěn qīn qiè, zǒng shì gēn tā liáo tiān. Xiǎo Míng jué dé zhè shì kāi shǐ xīn yī tiān zuì hǎo de fāng shì.",
+    english: "Xiao Ming drinks a cup of coffee every morning. He likes to read books in the cafe and enjoy the peaceful morning. The aroma of coffee makes him feel very relaxed. Sometimes he orders a sandwich to eat with his coffee. The cafe owner is very friendly and always chats with him. Xiao Ming thinks this is the best way to start a new day.",
+    questions: [],
+    words: ["杯子", "咖啡", "點心", "豬肉", "菜", "飲料", "果汁", "紙", "桌子", "筆", "帽子", "裙子", "行李", "花", "樹", "作業", "球", "路口", "旅館", "百貨公司"]
+  });
+  const [paragraphLoadingStatus, setParagraphLoadingStatus] = useState("");
+  const [showPinyin, setShowPinyin] = useState(false);
+  const [showEnglish, setShowEnglish] = useState(false);
+  const [highlightWords, setHighlightWords] = useState(false);
+  const [questionAnswers, setQuestionAnswers] = useState({});
+  const [visibleTranslations, setVisibleTranslations] = useState({}); // Track which translations are visible
 
   // Session Summary State
   const [revealedReviewItems, setRevealedReviewItems] = useState({});
@@ -588,54 +598,104 @@ export default function App() {
     setIsChatting(false);
   };
 
-  // --- Mock Test Logic ---
-  const startMockGeneration = async () => {
+  // --- Paragraph Practice Logic ---
+  const startParagraphGeneration = async () => {
     if (!effectiveKey) { setShowSettings(true); return; }
-    setAppMode('mock-loading');
-    setMockLoadingStatus("Drafting questions...");
+    setAppMode('paragraph-loading');
+    setParagraphLoadingStatus("Generating paragraph...");
+    
+    // Reset UI state
+    setShowPinyin(false);
+    setShowEnglish(false);
+    setHighlightWords(false);
+    setQuestionAnswers({});
+    setVisibleTranslations({});
     
     // Construct vocabulary context if option is selected
     let vocabContext = "";
-    if (mockConfig.useCurrentDeck) {
+    if (paragraphConfig.useCurrentDeck) {
       const deckWords = cards.map(c => c.char).join(", ");
-      vocabContext = `Vocabulary Constraint: Construct questions primarily using these words: [${deckWords}].`;
+      const familiarityLevels = {
+        1: "Use the flashcard words naturally and balanced throughout the paragraph",
+        2: "Incorporate flashcard words with slight repetition for familiarity",
+        3: "Use flashcard words moderately with some repetition",
+        4: "Prioritize flashcard words with high repetition for familiarity",
+        5: "Maximize repetition of flashcard words to create very familiar vocabulary"
+      };
+      vocabContext = `Vocabulary Constraint: Use these words from the flashcard set: [${deckWords}]. ${familiarityLevels[paragraphConfig.familiarity]}.`;
     }
 
-    const prompt = `Generate ${mockConfig.count} TOCFL Band ${mockConfig.level} reading questions. 
+    const lengthMap = {
+      'short': '50-80 words',
+      'medium': '80-120 words', 
+      'long': '120-160 words'
+    };
+
+    const prompt = `Generate a TOCFL Band ${paragraphConfig.level} reading comprehension paragraph in traditional Chinese characters.
     ${vocabContext}
-    Style: TOCFL Reading Part 2 (Picture Description).
-    For each question, describe a simple daily life situation suitable for a line-drawing illustration.
-    Format: JSON Array of objects. Each object: { 
-      "image_prompt": "Description for a black and white line drawing, simple educational style, no text", 
-      "options": ["Sentence Option A", "Sentence Option B", "Sentence Option C"], 
-      "correct_index": 0,
-      "explanation": "Brief explanation in English why the correct option fits the image description."
-    }`;
+    Style: TOCFL Reading Part 3 (Paragraph Comprehension) - coherent narrative about daily life situations.
+    Length: ${lengthMap[paragraphConfig.length]}
+    Include vocabulary appropriate for TOCFL Band ${paragraphConfig.level} level.
+    ${paragraphConfig.includeQuestions ? 
+      'Also generate 3-5 comprehension questions based on the paragraph content. Questions should test understanding of main ideas, details, and vocabulary. Include English translations for each question and all answer options.' : 
+      ''}
+    Return ${paragraphConfig.includeQuestions ? 'a JSON object' : 'the paragraph in traditional Chinese characters only'}.
+    ${paragraphConfig.includeQuestions ? 
+      'Format: {"paragraph": "paragraph text", "questions": [{"question": "question text in Chinese", "question_english": "question translation", "options": ["A) option1 in Chinese", "B) option2 in Chinese", "C) option3 in Chinese"], "options_english": ["A) option1 translation", "B) option2 translation", "C) option3 translation"], "correct_answer": "A", "explanation": "brief explanation in English"}]}' : 
+      ''}`;
     
     try {
-      const textData = await callGemini(prompt, "Return valid JSON only.", effectiveKey, "application/json");
-      if (!textData) { throw new Error("No data returned"); }
-
-      // Robust JSON parsing: clean markdown code blocks if present
-      const cleanedText = textData.replace(/```json|```/g, '').trim();
-      const questions = JSON.parse(cleanedText);
-      const questionsWithImages = [];
+      const response = await callGemini(
+        prompt, 
+        paragraphConfig.includeQuestions ? "Return valid JSON only." : "Return only the paragraph text in traditional Chinese.", 
+        effectiveKey, 
+        paragraphConfig.includeQuestions ? "application/json" : "text/plain"
+      );
       
-      for (let i = 0; i < questions.length; i++) {
-        setMockLoadingStatus(`Illustrating question ${i + 1}/${questions.length}...`);
-        // Optimized prompt for B&W line art style
-        const imageStyle = "black and white line drawing, simple sketch, educational test style, no text, white background, minimalist vector art";
-        const imgUrl = await generateImage(`${questions[i].image_prompt}. ${imageStyle}`, effectiveKey);
-        questionsWithImages.push({ ...questions[i], imageUrl: imgUrl });
+      let paragraphData;
+      if (paragraphConfig.includeQuestions) {
+        // Parse JSON response with questions
+        const cleanedResponse = response.replace(/```json|```/g, '').trim();
+        const parsedData = JSON.parse(cleanedResponse);
+        paragraphData = {
+          chinese: parsedData.paragraph,
+          questions: parsedData.questions
+        };
+      } else {
+        // Plain text paragraph response
+        paragraphData = {
+          chinese: response
+        };
       }
+      
+      if (!paragraphData.chinese) { throw new Error("No paragraph generated"); }
 
-      setMockQuestions(questionsWithImages);
-      setMockAnswers(new Array(questionsWithImages.length).fill(null));
-      setCurrentIndex(0);
-      setAppMode('mock-test');
+      // Generate pinyin and English translation
+      setParagraphLoadingStatus("Generating translations...");
+      const translationPrompt = `For this Chinese paragraph, provide:
+1. Pinyin with tone marks
+2. English translation
+
+Paragraph: ${paragraphData.chinese}
+
+Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
+      
+      const translationData = await callGemini(translationPrompt, "Return valid JSON only.", effectiveKey, "application/json");
+      const cleanedTranslation = translationData.replace(/```json|```/g, '').trim();
+      const translations = JSON.parse(cleanedTranslation);
+
+      setParagraphData({
+        chinese: paragraphData.chinese,
+        pinyin: translations.pinyin,
+        english: translations.english,
+        questions: paragraphData.questions || [],
+        words: cards.map(c => c.char) // Store the flashcard words for highlighting
+      });
+      
+      setAppMode('paragraph-practice');
     } catch (e) { 
-      console.error("Mock Test Generation Failed:", e);
-      setMockLoadingStatus(`Error: ${e.message}`);
+      console.error("Paragraph Generation Failed:", e);
+      setParagraphLoadingStatus(`Error: ${e.message}`);
       setTimeout(() => setAppMode('flashcards'), 2000);
     }
   };
@@ -671,10 +731,10 @@ export default function App() {
           Flashcards
         </button>
         <button 
-          onClick={() => setAppMode('mock-setup')} 
-          className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${appMode.includes('mock') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
+          onClick={() => setAppMode('paragraph-setup')} 
+          className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${appMode.includes('paragraph') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
         >
-          Mock Test
+          Paragraph Practice
         </button>
       </div>
 
@@ -698,22 +758,41 @@ export default function App() {
   );
 
   // --- Views ---
-  if (appMode === 'mock-setup') {
+  if (appMode === 'paragraph-setup') {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-6 ${themeClass}`}>
         <Header />
         <div className={`max-w-md w-full rounded-3xl p-8 shadow-2xl ${cardBg} border`}>
           <h2 className="text-2xl font-black mb-8 flex items-center gap-2">
-            <BrainCircuit className="text-indigo-500" /> Exam Configuration
+            <BookOpen className="text-indigo-500" /> Paragraph Practice Setup
           </h2>
           
           <div className="space-y-6">
+            {/* Flashcard Upload */}
             <div>
-              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Band Level</label>
-              <div className="grid grid-cols-2 gap-3">
-                {['A1', 'A2'].map(l => (
-                  <button key={l} onClick={() => setMockConfig(c => ({...c, level: l}))}
-                    className={`py-3 rounded-xl font-bold border-2 transition-all ${mockConfig.level === l ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Flashcard Set</label>
+              <div className="space-y-3">
+                <button 
+                  onClick={() => fileInputRef.current.click()} 
+                  className="w-full py-3 px-4 rounded-xl border-2 border-dashed border-slate-400 hover:border-indigo-500 transition-colors flex items-center justify-center gap-2 text-slate-500 hover:text-indigo-500"
+                >
+                  <Upload size={20} />
+                  Upload Flashcard Set (.csv, .txt, .docx)
+                </button>
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx" />
+                
+                <div className={`p-3 rounded-xl text-sm ${cards.length > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800/50 text-slate-400'}`}>
+                  {cards.length > 0 ? `${cards.length} flashcards loaded` : 'No flashcards loaded - will use default set'}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">TOCFL Band Level</label>
+              <div className="grid grid-cols-3 gap-3">
+                {['A', 'B', 'C'].map(l => (
+                  <button key={l} onClick={() => setParagraphConfig(c => ({...c, level: l}))}
+                    className={`py-3 rounded-xl font-bold border-2 transition-all ${paragraphConfig.level === l ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
                     Band {l}
                   </button>
                 ))}
@@ -721,12 +800,17 @@ export default function App() {
             </div>
 
             <div>
-              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Questions (Capped for speed)</label>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Paragraph Length</label>
               <div className="grid grid-cols-3 gap-3">
-                {[3, 5, 10].map(c => (
-                  <button key={c} onClick={() => setMockConfig(n => ({...n, count: c}))}
-                    className={`py-3 rounded-xl font-bold border-2 transition-all ${mockConfig.count === c ? 'border-emerald-500 bg-emerald-500/10 text-emerald-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
-                    {c}
+                {[
+                  { key: 'short', label: 'Short', desc: '50-80 words' },
+                  { key: 'medium', label: 'Medium', desc: '80-120 words' },
+                  { key: 'long', label: 'Long', desc: '120-160 words' }
+                ].map(({ key, label, desc }) => (
+                  <button key={key} onClick={() => setParagraphConfig(c => ({...c, length: key}))}
+                    className={`py-3 rounded-xl font-bold border-2 transition-all text-center ${paragraphConfig.length === key ? 'border-emerald-500 bg-emerald-500/10 text-emerald-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
+                    <div>{label}</div>
+                    <div className="text-xs opacity-60">{desc}</div>
                   </button>
                 ))}
               </div>
@@ -734,28 +818,96 @@ export default function App() {
 
             {/* Use Current Deck Toggle */}
             <div 
-              onClick={() => setMockConfig(c => ({...c, useCurrentDeck: !c.useCurrentDeck}))}
-              className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex items-center justify-between group ${mockConfig.useCurrentDeck ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-800 bg-slate-800/50'}`}
+              onClick={() => setParagraphConfig(c => ({...c, useCurrentDeck: !c.useCurrentDeck}))}
+              className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex items-center justify-between group ${paragraphConfig.useCurrentDeck ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-800 bg-slate-800/50'}`}
             >
               <div className="flex items-center gap-3">
-                <BookOpen size={20} className={mockConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-500'} />
+                <BookOpen size={20} className={paragraphConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-500'} />
                 <div>
-                  <div className={`font-bold text-sm ${mockConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-400'}`}>Use Flashcard Vocabulary</div>
-                  <div className="text-xs opacity-60">Prioritize words from your current deck</div>
+                  <div className={`font-bold text-sm ${paragraphConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-400'}`}>Use Flashcard Vocabulary</div>
+                  <div className="text-xs opacity-60">Incorporate words from your flashcard set</div>
                 </div>
               </div>
-              <div className={`w-6 h-6 rounded-md flex items-center justify-center border transition-colors ${mockConfig.useCurrentDeck ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600'}`}>
-                {mockConfig.useCurrentDeck && <CheckSquare size={16} className="text-white" />}
+              <div className={`w-6 h-6 rounded-md flex items-center justify-center border transition-colors ${paragraphConfig.useCurrentDeck ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600'}`}>
+                {paragraphConfig.useCurrentDeck && <CheckSquare size={16} className="text-white" />}
+              </div>
+            </div>
+
+            {/* Vocabulary Familiarity Slider - Only show when using current deck and enough flashcards */}
+            {paragraphConfig.useCurrentDeck && (() => {
+              const minFlashcards = { short: 50, medium: 80, long: 120 }[paragraphConfig.length];
+              const hasEnoughFlashcards = cards.length >= minFlashcards;
+              
+              return hasEnoughFlashcards ? (
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Vocabulary Familiarity</label>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-400">Normal</span>
+                      <span className="text-slate-400">Very Familiar</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="5"
+                      value={paragraphConfig.familiarity}
+                      onChange={(e) => setParagraphConfig(c => ({...c, familiarity: parseInt(e.target.value)}))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                      style={{
+                        background: `linear-gradient(to right, #6366f1 0%, #6366f1 ${(paragraphConfig.familiarity - 1) * 25}%, #374151 ${(paragraphConfig.familiarity - 1) * 25}%, #374151 100%)`
+                      }}
+                    />
+                    <div className="flex justify-between text-xs text-slate-500">
+                      <span>1</span>
+                      <span>2</span>
+                      <span>3</span>
+                      <span>4</span>
+                      <span>5</span>
+                    </div>
+                    <div className="text-center text-sm text-slate-400">
+                      {paragraphConfig.familiarity === 1 && "Balanced vocabulary usage"}
+                      {paragraphConfig.familiarity === 2 && "Slightly more familiar words"}
+                      {paragraphConfig.familiarity === 3 && "Moderately familiar vocabulary"}
+                      {paragraphConfig.familiarity === 4 && "Highly familiar words"}
+                      {paragraphConfig.familiarity === 5 && "Maximum vocabulary repetition"}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-orange-500/10 p-4 rounded-xl border border-orange-500/20 text-orange-500 text-sm">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={16} />
+                    <span className="font-medium">Need {minFlashcards - cards.length} more flashcards</span>
+                  </div>
+                  <p className="mt-1">Add more flashcards to unlock vocabulary familiarity controls for {paragraphConfig.length} paragraphs.</p>
+                </div>
+              );
+            })()}
+
+            {/* Include Questions Toggle */}
+            <div 
+              onClick={() => setParagraphConfig(c => ({...c, includeQuestions: !c.includeQuestions}))}
+              className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex items-center justify-between group ${paragraphConfig.includeQuestions ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/50'}`}
+            >
+              <div className="flex items-center gap-3">
+                <CheckSquare size={20} className={paragraphConfig.includeQuestions ? 'text-emerald-500' : 'text-slate-500'} />
+                <div>
+                  <div className={`font-bold text-sm ${paragraphConfig.includeQuestions ? 'text-emerald-500' : 'text-slate-400'}`}>Include Comprehension Questions</div>
+                  <div className="text-xs opacity-60">Generate 3-5 questions to test understanding</div>
+                </div>
+              </div>
+              <div className={`w-6 h-6 rounded-md flex items-center justify-center border transition-colors ${paragraphConfig.includeQuestions ? 'bg-emerald-500 border-emerald-500' : 'border-slate-600'}`}>
+                {paragraphConfig.includeQuestions && <CheckSquare size={16} className="text-white" />}
               </div>
             </div>
 
             <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm flex gap-3">
               <AlertCircle className="shrink-0" />
-              <p>Generates unique AI illustrations for every question. Takes ~5s per question.</p>
+              <p>Generates a custom paragraph using AI based on your settings. {paragraphConfig.includeQuestions ? 'Includes 3-5 comprehension questions. ' : ''}Takes ~10-15 seconds.</p>
             </div>
 
-            <button onClick={startMockGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
-              Start Exam
+            <button onClick={startParagraphGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
+              Generate Paragraph
             </button>
           </div>
         </div>
@@ -764,143 +916,249 @@ export default function App() {
     );
   }
 
-  if (appMode === 'mock-loading') {
+  if (appMode === 'paragraph-loading') {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-8 ${themeClass}`}>
         <div className="relative mb-8">
           <Loader2 size={80} className="animate-spin text-indigo-500" />
           <Sparkles className="absolute top-0 right-0 text-amber-400 animate-pulse" />
         </div>
-        <h3 className="text-3xl font-black mb-4">Building Exam</h3>
-        <p className="text-slate-500 font-medium animate-pulse">{mockLoadingStatus}</p>
+        <h3 className="text-3xl font-black mb-4">Generating Paragraph</h3>
+        <p className="text-slate-500 font-medium animate-pulse">{paragraphLoadingStatus}</p>
       </div>
     );
   }
 
-  if (appMode === 'mock-test') {
-    const q = mockQuestions[currentIndex] || {};
-    const isAnswered = mockAnswers[currentIndex] != null;
+  if (appMode === 'paragraph-practice') {
+    // Function to highlight words from flashcard set
+    const highlightFlashcardWords = (text) => {
+      if (!highlightWords || !paragraphData?.words) return text;
+      
+      let highlightedText = text;
+      paragraphData.words.forEach(word => {
+        const regex = new RegExp(`(${word})`, 'g');
+        highlightedText = highlightedText.replace(regex, `<span class="bg-yellow-300 text-black px-1 rounded">$1</span>`);
+      });
+      
+      return highlightedText;
+    };
 
     return (
       <div className={`min-h-screen flex flex-col items-center p-4 transition-colors duration-300 font-sans ${themeClass} ${isDarkMode ? 'dark' : ''}`}>
         <Header />
 
-        <main className="w-full max-w-md flex-1 flex flex-col justify-center">
-            {/* Progress */}
-            <div className="w-full max-w-md mb-8 flex items-center justify-between">
-               <div className="flex-1 bg-slate-200 dark:bg-slate-700 h-2 rounded-full overflow-hidden mr-4">
-                 <div className="bg-indigo-500 h-full transition-all duration-500" style={{ width: `${((currentIndex + 1) / mockQuestions.length) * 100}%` }} />
-               </div>
-               <span className="font-mono font-bold text-slate-500 text-xs">{currentIndex + 1}/{mockQuestions.length}</span>
-            </div>
-
+        <main className="w-full max-w-4xl flex-1 flex flex-col justify-center">
             {/* Content Container */}
-            <div className="w-full max-w-md flex flex-col gap-6 mb-4">
+            <div className="w-full max-w-4xl flex flex-col gap-6 mb-4">
                 
-                {/* Image Box */}
-                <div className={`h-64 w-full rounded-[2.5rem] overflow-hidden shadow-2xl relative flex items-center justify-center border ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                  {q.imageUrl ? (
-                    <img src={q.imageUrl} alt="Scenario" className="w-full h-full object-contain p-2" />
-                  ) : (
-                    <Loader2 className="animate-spin m-auto text-indigo-500" />
+                {/* Paragraph Display */}
+                <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                  
+                  {/* Title */}
+                  <div className="text-center">
+                    <h2 className="text-2xl font-black text-indigo-600 mb-2">Reading Practice</h2>
+                    <p className="text-sm text-slate-500">
+                      TOCFL Band {paragraphConfig.level} • {paragraphConfig.length} paragraph
+                      {paragraphConfig.useCurrentDeck && ` • Familiarity: ${paragraphConfig.familiarity}/5`}
+                    </p>
+                  </div>
+
+                  {/* Chinese Text */}
+                  <div className="text-center">
+                    <div 
+                      className="text-xl leading-relaxed mb-4"
+                      dangerouslySetInnerHTML={{ 
+                        __html: highlightFlashcardWords(paragraphData?.chinese || '') 
+                      }}
+                    />
+                  </div>
+
+                  {/* Control Buttons */}
+                  <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                    <button 
+                      onClick={() => setShowPinyin(!showPinyin)}
+                      className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
+                        showPinyin 
+                          ? 'bg-blue-600 text-white' 
+                          : 'bg-blue-100 text-blue-600 hover:bg-blue-200'
+                      }`}
+                    >
+                      <Volume2 size={20} />
+                      {showPinyin ? 'Hide Pinyin' : 'Show Pinyin'}
+                    </button>
+
+                    <button 
+                      onClick={() => setShowEnglish(!showEnglish)}
+                      className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
+                        showEnglish 
+                          ? 'bg-green-600 text-white' 
+                          : 'bg-green-100 text-green-600 hover:bg-green-200'
+                      }`}
+                    >
+                      <Eye size={20} />
+                      {showEnglish ? 'Hide Translation' : 'Show Translation'}
+                    </button>
+
+                    <button 
+                      onClick={() => setHighlightWords(!highlightWords)}
+                      className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
+                        highlightWords 
+                          ? 'bg-yellow-500 text-white' 
+                          : 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                      }`}
+                    >
+                      <Star size={20} />
+                      {highlightWords ? 'Hide Vocabulary' : 'Highlight Vocabulary'}
+                    </button>
+                  </div>
+
+                  {/* Pinyin Display */}
+                  {showPinyin && (
+                    <div className="animate-in fade-in slide-in-from-bottom-4">
+                      <div className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                        <span className="font-bold text-blue-500 block mb-1">Pinyin:</span>
+                        <div className="text-lg leading-relaxed italic">{paragraphData?.pinyin || "Loading..."}</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* English Translation Display */}
+                  {showEnglish && (
+                    <div className="animate-in fade-in slide-in-from-bottom-4">
+                      <div className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                        <span className="font-bold text-green-500 block mb-1">English Translation:</span>
+                        <div className="text-lg leading-relaxed">{paragraphData?.english || "Loading..."}</div>
+                      </div>
+                    </div>
                   )}
                 </div>
 
-                {/* Options with Feedback Logic */}
-                <div className="flex flex-col space-y-3">
-                  {(q.options || []).map((opt, idx) => {
-                     const isSelected = mockAnswers[currentIndex] === idx;
-                     const isCorrect = idx === q.correct_index;
-                     const showCorrectness = isAnswered;
-                     
-                     let btnClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
-                     let textClass = '';
-                     
-                     if (showCorrectness) {
-                       if (isCorrect) {
-                         btnClass = 'bg-emerald-500/20 border-emerald-500';
-                         textClass = 'text-emerald-500';
-                       } else if (isSelected && !isCorrect) {
-                         btnClass = 'bg-red-500/20 border-red-500';
-                         textClass = 'text-red-500';
-                       } else {
-                         btnClass = 'opacity-50';
-                       }
-                     } else {
-                        btnClass += ' hover:bg-indigo-600 hover:text-white hover:border-indigo-600';
-                     }
+                {/* Comprehension Questions */}
+                {paragraphData?.questions && paragraphData.questions.length > 0 && (
+                  <div className="w-full max-w-4xl mt-6">
+                    <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                      <div className="text-center mb-6">
+                        <h3 className="text-xl font-black text-indigo-600 mb-2">Comprehension Questions</h3>
+                        <p className="text-sm text-slate-500">Test your understanding of the paragraph</p>
+                      </div>
 
-                     return (
-                      <button 
-                        key={idx} 
-                        onClick={() => {
-                          if (isAnswered) return;
-                          const newAns = [...mockAnswers]; 
-                          newAns[currentIndex] = idx; 
-                          setMockAnswers(newAns);
-                          if (idx === q.correct_index) {
-                             if (soundEnabled) SoundFX.correct();
-                          } else {
-                             if (soundEnabled) SoundFX.wrong();
-                          }
-                        }} 
-                        disabled={isAnswered}
-                        className={`w-full p-4 text-left rounded-2xl transition-all font-bold border group flex justify-between items-center ${btnClass} ${textClass}`}
-                      >
-                        <span>{opt}</span>
-                        {showCorrectness && isCorrect && <CheckCircle2 className="text-emerald-500" />}
-                        {showCorrectness && isSelected && !isCorrect && <XCircle className="text-red-500" />}
-                        {!showCorrectness && <ChevronRight className={`opacity-0 group-hover:opacity-100 transition-opacity ${isDarkMode ? 'text-white' : 'text-white'}`} />}
-                      </button>
-                     );
-                  })}
-                </div>
+                      <div className="space-y-6">
+                        {paragraphData.questions.map((question, qIndex) => {
+                          const userAnswer = questionAnswers[qIndex];
+                          const hasAnswered = userAnswer !== undefined;
+                          const isCorrect = hasAnswered && userAnswer === question.correct_answer;
+                          const showQuestionTranslation = visibleTranslations[`question-${qIndex}`];
+                          
+                          return (
+                            <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
+                                {question.question_english && (
+                                  <button
+                                    onClick={() => setVisibleTranslations(prev => ({...prev, [`question-${qIndex}`]: !prev[`question-${qIndex}`]}))}
+                                    className="ml-2 p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                                    title={showQuestionTranslation ? "Hide translation" : "Show translation"}
+                                  >
+                                    {showQuestionTranslation ? <EyeOff className="w-4 h-4 text-slate-500" /> : <Eye className="w-4 h-4 text-slate-500" />}
+                                  </button>
+                                )}
+                              </div>
+                              {question.question_english && showQuestionTranslation && (
+                                <div className="text-sm text-slate-500 mb-3 italic">{question.question_english}</div>
+                              )}
+                              
+                              <div className="space-y-2">
+                                {question.options.map((option, oIndex) => {
+                                  const optionLetter = String.fromCharCode(65 + oIndex); // A, B, C, D
+                                  const isSelected = userAnswer === optionLetter;
+                                  const isCorrectOption = optionLetter === question.correct_answer;
+                                  const showCorrectness = hasAnswered;
+                                  const showOptionTranslation = visibleTranslations[`option-${qIndex}-${oIndex}`];
+                                  
+                                  let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+                                  
+                                  if (showCorrectness) {
+                                    if (isCorrectOption) {
+                                      optionClass = 'bg-emerald-500/20 border-emerald-500';
+                                    } else if (isSelected && !isCorrectOption) {
+                                      optionClass = 'bg-red-500/20 border-red-500';
+                                    }
+                                  } else {
+                                    optionClass += ' hover:bg-indigo-600 hover:text-white hover:border-indigo-600';
+                                  }
 
-                {/* Explanation & Next Button */}
-                {isAnswered && (
-                  <div className="animate-in fade-in slide-in-from-bottom-4">
-                     <div className={`p-4 rounded-xl mb-4 text-sm leading-relaxed border ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
-                        <span className="font-bold text-indigo-500 block mb-1">Explanation:</span>
-                        {q.explanation || "No explanation provided."}
-                     </div>
-                     
-                     <button 
-                       onClick={() => {
-                         if (currentIndex < mockQuestions.length - 1) {
-                            setCurrentIndex(p => p + 1); 
-                         } else {
-                            setAppMode('mock-result');
-                         }
-                       }}
-                       className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all flex items-center justify-center gap-2"
-                     >
-                       {currentIndex < mockQuestions.length - 1 ? 'Next Question' : 'Finish Exam'} <ChevronRight />
-                     </button>
+                                  return (
+                                    <div key={oIndex} className="space-y-1">
+                                      <div className="flex items-center justify-between">
+                                        <button
+                                          onClick={() => {
+                                            if (!hasAnswered) {
+                                              setQuestionAnswers(prev => ({...prev, [qIndex]: optionLetter}));
+                                            }
+                                          }}
+                                          disabled={hasAnswered}
+                                          className={`flex-1 p-3 text-left rounded-xl transition-all font-bold border group flex justify-between items-center ${optionClass}`}
+                                        >
+                                          <span>{option}</span>
+                                          <div className="flex items-center space-x-2">
+                                            {question.options_english && question.options_english[oIndex] && (
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setVisibleTranslations(prev => ({...prev, [`option-${qIndex}-${oIndex}`]: !prev[`option-${qIndex}-${oIndex}`]}));
+                                                }}
+                                                className="p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                                                title={showOptionTranslation ? "Hide translation" : "Show translation"}
+                                              >
+                                                {showOptionTranslation ? <EyeOff className="w-3 h-3 text-slate-500" /> : <Eye className="w-3 h-3 text-slate-500" />}
+                                              </button>
+                                            )}
+                                            {showCorrectness && isCorrectOption && <CheckCircle2 className="text-emerald-500" />}
+                                            {showCorrectness && isSelected && !isCorrectOption && <XCircle className="text-red-500" />}
+                                          </div>
+                                        </button>
+                                      </div>
+                                      {question.options_english && question.options_english[oIndex] && showOptionTranslation && (
+                                        <div className="text-sm text-slate-500 ml-3 italic">{question.options_english[oIndex]}</div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {hasAnswered && question.explanation && (
+                                <div className="mt-4 p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
+                                  <div className="font-bold text-indigo-600 text-sm mb-1">Explanation:</div>
+                                  <div className="text-sm text-slate-600">{question.explanation}</div>
+                                  <div className={`mt-2 text-sm font-bold ${isCorrect ? 'text-emerald-600' : 'text-red-600'}`}>
+                                    {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${question.correct_answer}.`}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
                   </div>
                 )}
-            </div>
 
-            {/* Bottom Nav Bar - New */}
-            <div className="flex gap-2 mb-4 mt-auto">
-                <button 
-                  onClick={() => setCurrentIndex(p => Math.max(0, p - 1))} 
-                  className={navBtnClass} 
-                  disabled={currentIndex === 0}
-                >
-                    <ChevronLeft />
-                </button>
-                
-                <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
-                    <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
-                </button>
-
-                 <button 
-                   onClick={() => setCurrentIndex(p => Math.min(mockQuestions.length - 1, p + 1))} 
-                   className={navBtnClass} 
-                   disabled={currentIndex === mockQuestions.length - 1}
-                 >
-                    <ChevronRight />
-                </button>
+                {/* Action Buttons */}
+                <div className="flex gap-4 justify-center">
+                  <button 
+                    onClick={() => setAppMode('paragraph-setup')}
+                    className="px-8 py-4 rounded-xl bg-slate-600 hover:bg-slate-500 text-white font-bold transition-all shadow-lg shadow-slate-500/20 active:scale-95"
+                  >
+                    New Paragraph
+                  </button>
+                  
+                  <button 
+                    onClick={() => setAppMode('flashcards')}
+                    className="px-8 py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all shadow-lg shadow-indigo-500/25 active:scale-95"
+                  >
+                    Back to Flashcards
+                  </button>
+                </div>
             </div>
         </main>
         {showSettings && <SettingsModal />}
@@ -908,54 +1166,7 @@ export default function App() {
     );
   }
 
-  if (appMode === 'mock-result') {
-    const correctCount = mockAnswers.filter((a, i) => a === mockQuestions[i].correct_index).length;
-    const percentage = (correctCount / mockQuestions.length) * 100;
-    
-    // Calculate Stars
-    let stars = 0;
-    if (percentage >= 20) stars = 1;
-    if (percentage >= 40) stars = 2;
-    if (percentage >= 60) stars = 3;
-    if (percentage >= 80) stars = 4;
-    if (percentage === 100) stars = 5;
 
-    // Emoji Logic
-    const Emoji = stars >= 4 ? Smile : stars >= 2 ? Meh : Frown;
-    const emojiColor = stars >= 4 ? 'text-emerald-500' : stars >= 2 ? 'text-yellow-500' : 'text-slate-400';
-
-    return (
-      <div className={`min-h-screen flex flex-col items-center justify-center p-6 relative overflow-hidden ${themeClass}`}>
-         {stars > 3 && <Confetti />}
-         
-         <div className={`max-w-md w-full p-8 rounded-[2.5rem] shadow-2xl text-center relative z-10 ${cardBg}`}>
-            
-            <div className={`mx-auto mb-4 w-20 h-20 rounded-full flex items-center justify-center ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'} ${emojiColor}`}>
-              <Emoji size={48} />
-            </div>
-
-            <div className="flex justify-center gap-2 mb-4">
-              {[...Array(5)].map((_, i) => (
-                <Star key={i} size={28} fill={i < stars ? "#fbbf24" : "none"} className={i < stars ? "text-amber-400" : "text-slate-300 dark:text-slate-700"} />
-              ))}
-            </div>
-
-            <h1 className="text-6xl font-black text-indigo-600 mb-2">{Math.round(percentage)}%</h1>
-            <p className="text-slate-400 font-bold uppercase tracking-widest mb-8">Score: {correctCount} / {mockQuestions.length}</p>
-            
-            <div className="space-y-3">
-              <button 
-                onClick={() => setAppMode('mock-setup')}
-                className="w-full py-4 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
-              >
-                Try Another Test
-              </button>
-              <button onClick={() => setAppMode('flashcards')} className={`w-full py-4 rounded-xl font-bold ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700' : 'bg-slate-200 hover:bg-slate-300'}`}>Back to Flashcards</button>
-            </div>
-         </div>
-      </div>
-    );
-  }
 
   if (isFinished) {
     const totalCards = cards.length;
@@ -1080,7 +1291,7 @@ export default function App() {
     const testConnection = async () => {
       setTestStatus('loading');
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${effectiveKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${effectiveKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: "Hello" }] }] })
@@ -1371,6 +1582,27 @@ export default function App() {
           100% { transform: translateY(100vh) rotate(360deg); opacity: 0; }
         }
         .animate-confetti { animation: confetti 3s ease-in-out forwards; }
+        
+        /* Custom slider styles */
+        input[type="range"]::-webkit-slider-thumb {
+          appearance: none;
+          height: 20px;
+          width: 20px;
+          border-radius: 50%;
+          background: #6366f1;
+          cursor: pointer;
+          border: 2px solid #ffffff;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        input[type="range"]::-moz-range-thumb {
+          height: 20px;
+          width: 20px;
+          border-radius: 50%;
+          background: #6366f1;
+          cursor: pointer;
+          border: 2px solid #ffffff;
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
       `}</style>
     </div>
   );
