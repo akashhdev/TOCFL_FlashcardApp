@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   ChevronLeft, ChevronRight, RotateCcw, Sparkles, MessageCircle, Send, 
   Loader2, X, Moon, Sun, Upload, Volume2, VolumeX, 
@@ -7,9 +7,37 @@ import {
   BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap
 } from 'lucide-react';
 
+/*
+  AGENT ORIENTATION NOTE
+  ---------------------------------------------------------------------------
+  This file is intentionally monolithic and drives the full app UI + logic.
+  The app is effectively a mode-based state machine controlled by `appMode`.
+
+  Primary modes:
+  - `flashcards`                : core card drill + scoring loop
+  - `paragraph-setup/loading/practice`
+  - `conversation-setup/loading/practice`
+
+  Audio strategy:
+  - SFX via WebAudio (`SoundFX`)
+  - Content speech uses layered fallback pipeline:
+    1) Google Translate TTS endpoint
+    2) Browser SpeechSynthesis
+    3) Gemini audio generation (when API key available)
+
+  AI strategy:
+  - All Gemini requests go through `callGemini`
+  - Token usage is constrained by `TOKEN_EFFICIENCY_INSTRUCTION`
+
+  Maintenance guidance for agents:
+  - Prefer adding helpers before JSX views, not inside JSX blocks.
+  - Keep output JSON contracts stable when changing prompts.
+  - If adding a new mode, mirror existing setup/loading/practice pattern.
+*/
+
 // --- Configuration ---
-// This is the fallback/system key. 
-const systemApiKey = "AIzaSyBh6KOF1JzLV_IGfTHEJWMVTpIZBHxoviM"; 
+const envApiKey = import.meta.env.VITE_GEMINI_API_KEY?.trim() || "";
+const TOKEN_EFFICIENCY_INSTRUCTION = "Be concise and token-efficient. Avoid repetition, filler, and verbose prefaces. Return only what is requested in the required format.";
 
 // --- Initial Data ---
 const INITIAL_DECK = [
@@ -70,11 +98,14 @@ const SoundFX = {
 };
 
 // --- API Helpers (Modified to accept key) ---
+// Centralized Gemini wrapper used by every AI feature.
+// It applies a shared token-efficiency system instruction + retry/fallback behavior.
 const callGemini = async (prompt, systemInstruction, key, responseMimeType = "text/plain") => {
   if (!key) return null;
   // Use gemini-3.1-flash-lite-preview for all AI tasks
   const model = "gemini-3.1-flash-lite-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const optimizedSystemInstruction = `${systemInstruction}\n${TOKEN_EFFICIENCY_INSTRUCTION}`;
   
   const makeRequest = async (retryCount = 0) => {
     try {
@@ -83,7 +114,7 @@ const callGemini = async (prompt, systemInstruction, key, responseMimeType = "te
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: systemInstruction }] },
+          systemInstruction: { parts: [{ text: optimizedSystemInstruction }] },
           generationConfig: { responseMimeType }
         })
       });
@@ -99,7 +130,7 @@ const callGemini = async (prompt, systemInstruction, key, responseMimeType = "te
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   contents: [{ parts: [{ text: prompt }] }],
-                  systemInstruction: { parts: [{ text: systemInstruction }] },
+                  systemInstruction: { parts: [{ text: optimizedSystemInstruction }] },
                   generationConfig: { responseMimeType }
                 })
              });
@@ -161,6 +192,7 @@ const generateImage = async (prompt, key) => {
   return makeRequest();
 };
 
+// Gemini-native TTS helper (kept as a fallback path when browser/web TTS is unavailable).
 const generateTTS = async (text, key) => {
   if (!key) return null;
   // TTS model - using gemini-3.1-flash-lite-preview
@@ -183,6 +215,7 @@ const generateTTS = async (text, key) => {
   } catch (err) { return null; }
 };
 
+// Converts raw PCM bytes returned by Gemini TTS into a playable WAV blob.
 const pcmToWav = (base64Pcm) => {
   const pcmBuffer = Uint8Array.from(atob(base64Pcm), c => c.charCodeAt(0)).buffer;
   const wavHeader = new ArrayBuffer(44);
@@ -195,6 +228,8 @@ const pcmToWav = (base64Pcm) => {
   writeString(36, 'data'); view.setUint32(40, pcmBuffer.byteLength, true);
   return new Blob([wavHeader, pcmBuffer], { type: 'audio/wav' });
 };
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // --- Sub-Components ---
 const Confetti = () => (
@@ -281,12 +316,13 @@ const TimerBar = ({ isActive, duration = 10, onExpire, resetKey }) => {
 
 // --- Main App Component ---
 export default function App() {
-  // Global State
+  // Global UI State
+  // `appMode` is the top-level route/state machine driver for the whole app.
   const [appMode, setAppMode] = useState('flashcards');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   
-  // Flashcard State
+  // Flashcard Session State
   const [cards, setCards] = useState(INITIAL_DECK);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
@@ -294,15 +330,15 @@ export default function App() {
   const [isBonusWindow, setIsBonusWindow] = useState(true); 
   const [timerKey, setTimerKey] = useState(0);
 
-  // Time Tracking State
+  // Flashcard Timing State
   const [startTime, setStartTime] = useState(Date.now());
   const [sessionDuration, setSessionDuration] = useState(0);
 
-  // Status: 'unvisited' | 'correct' | 'wrong' | 'missed'
+  // Card evaluation state model: 'unvisited' | 'correct' | 'wrong' | 'missed'
   const [cardStatuses, setCardStatuses] = useState(new Array(INITIAL_DECK.length).fill('unvisited'));
   const [isFinished, setIsFinished] = useState(false);
 
-  // AI & Chat State
+  // Context/Chat assistant state
   const [aiSentence, setAiSentence] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [showChat, setShowChat] = useState(false);
@@ -311,13 +347,13 @@ export default function App() {
   const [isChatting, setIsChatting] = useState(false);
   const [isContextRevealed, setIsContextRevealed] = useState(false);
   
-  // Custom API Key State
+  // API key sources: user-entered key (localStorage) overrides env key.
   const [customKey, setCustomKey] = useState(() => localStorage.getItem('gemini_key') || "");
   const [showSettings, setShowSettings] = useState(false);
   
-  const effectiveKey = customKey || systemApiKey;
+  const effectiveKey = customKey || envApiKey;
 
-  // Paragraph Practice State
+  // Paragraph Practice State (reading comprehension workflow)
   const [paragraphConfig, setParagraphConfig] = useState({ level: 'A', length: 'short', useCurrentDeck: false, familiarity: 1, includeQuestions: false });
   const [paragraphData, setParagraphData] = useState({
     chinese: "小明每天早上都會喝一杯咖啡。他喜歡在咖啡廳裡看書，感受寧靜的早晨。咖啡的香味讓他覺得很放鬆。有時候他會點一個三明治，跟咖啡一起吃。咖啡廳的老闆娘很親切，總是跟他聊天。小明覺得這是開始新一天最好的方式。",
@@ -333,7 +369,7 @@ export default function App() {
   const [questionAnswers, setQuestionAnswers] = useState({});
   const [visibleTranslations, setVisibleTranslations] = useState({}); // Track which translations are visible
 
-  // Conversation Practice State
+  // Conversation Practice State (listening workflow)
   const [conversationConfig, setConversationConfig] = useState({ level: 'A', length: 'short', useCurrentDeck: false, familiarity: 1, includeQuestions: true });
   const [conversationData, setConversationData] = useState({
     title: '日常對話',
@@ -347,12 +383,74 @@ export default function App() {
   const [conversationVisibleTranslations, setConversationVisibleTranslations] = useState({});
   const [playingTurnIndex, setPlayingTurnIndex] = useState(null);
 
-  // Session Summary State
+  // Post-session review state for flashcards summary screen.
   const [revealedReviewItems, setRevealedReviewItems] = useState({});
 
   const fileInputRef = useRef(null);
   const currentCard = cards[currentIndex] || {};
   const speakerVoicePreferenceRef = useRef({});
+
+  // Derived counters to avoid repeated O(n) scans during render.
+  const statusStats = useMemo(() => {
+    let correct = 0;
+    let wrong = 0;
+    let missed = 0;
+
+    for (const status of cardStatuses) {
+      if (status === 'correct') correct += 1;
+      else if (status === 'wrong') wrong += 1;
+      else if (status === 'missed') missed += 1;
+    }
+
+    return { correct, wrong, missed };
+  }, [cardStatuses]);
+
+  // Derived flashcard summary payload used by the completion view.
+  const sessionSummary = useMemo(() => {
+    const totalCards = cards.length;
+    const correctCount = statusStats.correct;
+    const percentage = totalCards > 0 ? (correctCount / totalCards) * 100 : 0;
+
+    let stars = 0;
+    if (percentage >= 20) stars = 1;
+    if (percentage >= 40) stars = 2;
+    if (percentage >= 60) stars = 3;
+    if (percentage >= 80) stars = 4;
+    if (percentage === 100) stars = 5;
+
+    const reviewCards = cardStatuses
+      .map((status, i) => ((status === 'wrong' || status === 'missed') ? { ...cards[i], status } : null))
+      .filter(Boolean);
+
+    return {
+      totalCards,
+      correctCount,
+      percentage,
+      stars,
+      reviewCards,
+    };
+  }, [cards, cardStatuses, statusStats.correct]);
+
+  // Precomputes highlighted paragraph HTML only when relevant inputs change.
+  const highlightedParagraphHtml = useMemo(() => {
+    const chineseText = paragraphData?.chinese || '';
+    if (!highlightWords || !chineseText || !Array.isArray(paragraphData?.words)) {
+      return chineseText;
+    }
+
+    const uniqueWords = [...new Set(paragraphData.words.filter(Boolean))].sort((a, b) => b.length - a.length);
+    if (uniqueWords.length === 0) {
+      return chineseText;
+    }
+
+    const pattern = uniqueWords.map(escapeRegExp).join('|');
+    if (!pattern) {
+      return chineseText;
+    }
+
+    const regex = new RegExp(`(${pattern})`, 'g');
+    return chineseText.replace(regex, '<span class="bg-yellow-300 text-black px-1 rounded">$1</span>');
+  }, [highlightWords, paragraphData]);
 
   // --- Initialization ---
   useEffect(() => {
@@ -371,6 +469,7 @@ export default function App() {
   };
 
   // --- Keyboard Shortcuts ---
+  // Scope is primarily flashcard mode to avoid mode-crossing key collisions.
   const handleKeyDown = useCallback((e) => {
     if (showChat || showSettings) {
        if (e.key === 'Escape') {
@@ -408,18 +507,20 @@ export default function App() {
         generateSmartSentence();
       }
     }
-  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings, cardStatuses, currentIndex]);
+  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
+  // Resets bonus window and progress bar for the next flashcard turn.
   const resetTimer = () => {
     setIsBonusWindow(true);
     setTimerKey(prev => prev + 1);
   };
 
+  // Marks untouched cards as missed when learner navigates away without grading.
   const updateStatusIfMissed = (index) => {
     if (cardStatuses[index] === 'unvisited') {
       const newStatuses = [...cardStatuses];
@@ -456,6 +557,7 @@ export default function App() {
     }
   };
 
+  // Central grading handler for flashcards; updates score, SFX, status, and flow.
   const markCard = (status) => {
     let points = 0;
     if (status === 'correct') {
@@ -486,6 +588,7 @@ export default function App() {
     }
   };
 
+  // Restarts either full deck or provided subset (used for review deck mode).
   const resetSession = (specificCards = null) => {
     const deckToUse = specificCards || cards;
     if (specificCards) setCards(specificCards);
@@ -509,21 +612,27 @@ export default function App() {
   };
 
   // --- Copy Helper ---
-  const copyToClipboard = (text) => {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    document.body.appendChild(textArea);
-    textArea.select();
+  const copyToClipboard = async (text) => {
     try {
-      document.execCommand('copy');
-      if (soundEnabled) SoundFX.playTone(800, 'sine', 0.1); // Feedback sound
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      }
+
+      if (soundEnabled) SoundFX.playTone(800, 'sine', 0.1);
     } catch (err) {
-      console.error('Fallback: Oops, unable to copy', err);
+      console.error('Unable to copy text to clipboard', err);
     }
-    document.body.removeChild(textArea);
   };
 
   // --- File Handling ---
+  // Accepts CSV/TXT/DOCX and normalizes to internal deck shape.
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -562,6 +671,8 @@ export default function App() {
   };
 
   // --- AI Actions ---
+  // Content TTS fallback chain is managed in `playGoogleTranslateTTS`; this method
+  // is the single entry point used by flashcards and other direct word playback UI.
   const playGeminiTTS = async (text) => {
     if (!effectiveKey) throw new Error('No Gemini API key for TTS fallback');
 
@@ -587,11 +698,12 @@ export default function App() {
     }
   };
 
+  // Generates a contextual example sentence for the active flashcard.
   const generateSmartSentence = async () => {
     if (!effectiveKey) { setShowSettings(true); return; }
     setIsGenerating(true);
     try {
-      const prompt = `Create a TOCFL Band A level sentence for the word: "${currentCard.char}". Format: [Traditional Chinese] | [Pinyin] | [English]`;
+      const prompt = `Create one natural TOCFL Band A sentence using "${currentCard.char}". Return exactly: [Traditional Chinese] | [Pinyin] | [English].`;
       const result = await callGemini(prompt, "You are a TOCFL Chinese tutor.", effectiveKey);
       if (result) {
         const [chinese, pinyin, english] = result.split('|').map(s => s.trim());
@@ -604,6 +716,7 @@ export default function App() {
     setIsGenerating(false);
   };
 
+  // Chat tutor bound to current card context.
   const handleChat = async (inputOverride = null) => {
     if (!effectiveKey) { setShowSettings(true); return; }
     const msg = inputOverride || chatInput;
@@ -613,9 +726,10 @@ export default function App() {
     setChatInput("");
     setIsChatting(true);
     
-    const prompt = `Context: User is studying card "${currentCard.char}" (${currentCard.meaning}). User asks: "${msg}". 
-    IMPORTANT: Answer strictly in English. Only use Chinese characters when explicitly citing the vocabulary. 
-    Format: Use **bold** for key terms, bullet points for lists, and ### for section headings.`;
+    const prompt = `Context: card "${currentCard.char}" (${currentCard.meaning}). User asks: "${msg}".
+  Answer in English. Use Chinese only when citing vocabulary.
+  Keep concise by default (short paragraphs/bullets), but still clear and useful.
+  Format: **bold** for key terms, bullets for lists, ### for section headings.`;
 
     try {
       const response = await callGemini(prompt, "You are a helpful Mandarin tutor. Always explain in English.", effectiveKey);
@@ -627,6 +741,9 @@ export default function App() {
   };
 
   // --- Paragraph Practice Logic ---
+  // Two-stage generation:
+  // 1) paragraph (+ optional questions)
+  // 2) pinyin + English translation enrichment
   const startParagraphGeneration = async () => {
     if (!effectiveKey) { setShowSettings(true); return; }
     setAppMode('paragraph-loading');
@@ -659,18 +776,13 @@ export default function App() {
       'long': '120-160 words'
     };
 
-    const prompt = `Generate a TOCFL Band ${paragraphConfig.level} reading comprehension paragraph in traditional Chinese characters.
-    ${vocabContext}
-    Style: TOCFL Reading Part 3 (Paragraph Comprehension) - coherent narrative about daily life situations.
-    Length: ${lengthMap[paragraphConfig.length]}
-    Include vocabulary appropriate for TOCFL Band ${paragraphConfig.level} level.
-    ${paragraphConfig.includeQuestions ? 
-      'Also generate 3-5 comprehension questions based on the paragraph content. Questions should test understanding of main ideas, details, and vocabulary. Include English translations for each question and all answer options.' : 
-      ''}
-    Return ${paragraphConfig.includeQuestions ? 'a JSON object' : 'the paragraph in traditional Chinese characters only'}.
-    ${paragraphConfig.includeQuestions ? 
-      'Format: {"paragraph": "paragraph text", "questions": [{"question": "question text in Chinese", "question_english": "question translation", "options": ["A) option1 in Chinese", "B) option2 in Chinese", "C) option3 in Chinese"], "options_english": ["A) option1 translation", "B) option2 translation", "C) option3 translation"], "correct_answer": "A", "explanation": "brief explanation in English"}]}' : 
-      ''}`;
+    const prompt = `Generate a TOCFL Band ${paragraphConfig.level} reading paragraph in traditional Chinese.
+${vocabContext}
+Topic: daily-life narrative, coherent and natural.
+Length: ${lengthMap[paragraphConfig.length]}.
+${paragraphConfig.includeQuestions ? 'Also include 3-5 comprehension MCQs (main idea, detail, vocabulary) with Chinese + English for question/options, plus correct answer and short English explanation.' : ''}
+Return ${paragraphConfig.includeQuestions ? 'JSON object only' : 'only the Chinese paragraph text'}.
+${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions":[{"question":"...","question_english":"...","options":["A)...","B)...","C)..."],"options_english":["A)...","B)...","C)..."],"correct_answer":"A","explanation":"..."}]}' : ''}`;
     
     try {
       const response = await callGemini(
@@ -700,13 +812,13 @@ export default function App() {
 
       // Generate pinyin and English translation
       setParagraphLoadingStatus("Generating translations...");
-      const translationPrompt = `For this Chinese paragraph, provide:
-1. Pinyin with tone marks
-2. English translation
+      const translationPrompt = `Convert this Chinese paragraph into:
+    1) Pinyin with tone marks
+    2) Natural English translation
 
-Paragraph: ${paragraphData.chinese}
+    Paragraph: ${paragraphData.chinese}
 
-Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
+    Return JSON only: {"pinyin":"...","english":"..."}`;
       
       const translationData = await callGemini(translationPrompt, "Return valid JSON only.", effectiveKey, "application/json");
       const cleanedTranslation = translationData.replace(/```json|```/g, '').trim();
@@ -729,6 +841,7 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
   };
 
   // --- Conversation Practice Logic ---
+  // Browser speech engine with optional speaker-aware voice selection.
   const playBrowserSpeechSynthesis = (text, speaker = null) => new Promise((resolve, reject) => {
     if (!('speechSynthesis' in window)) {
       reject(new Error('Speech synthesis is not supported in this browser'));
@@ -783,6 +896,7 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
     window.speechSynthesis.speak(utterance);
   });
 
+  // Network TTS with chunking + fallback policy.
   const playGoogleTranslateTTS = async (
     text,
     {
@@ -855,6 +969,7 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
     }
   };
 
+  // Plays one transcript turn and updates inline UI spinner state.
   const playConversationTurn = async (turn, index) => {
     if (!turn?.text) return;
     setPlayingTurnIndex(index);
@@ -874,6 +989,7 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
     }
   };
 
+  // Generates structured listening transcript + optional questions via JSON schema prompt.
   const startConversationGeneration = async () => {
     if (!effectiveKey) { setShowSettings(true); return; }
     setAppMode('conversation-loading');
@@ -938,6 +1054,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
     }
   };
 
+  // Progressive transcript reveal timer for conversation playback UX.
   useEffect(() => {
     if (appMode !== 'conversation-practice') return;
 
@@ -972,6 +1089,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
   const navBtnClass = `p-4 rounded-2xl transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`;
 
   // --- Components ---
+  // Header is shared across all modes and acts as global mode switcher.
   const Header = () => (
     <header className="flex items-center justify-between w-full max-w-4xl mb-6 px-4">
       <div className="flex items-center gap-2">
@@ -1022,6 +1140,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
   );
 
   // --- Views ---
+  // Mode-specific UI is kept in sequential early returns for readability.
   if (appMode === 'paragraph-setup') {
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-6 ${themeClass}`}>
@@ -1533,19 +1652,6 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
   }
 
   if (appMode === 'paragraph-practice') {
-    // Function to highlight words from flashcard set
-    const highlightFlashcardWords = (text) => {
-      if (!highlightWords || !paragraphData?.words) return text;
-      
-      let highlightedText = text;
-      paragraphData.words.forEach(word => {
-        const regex = new RegExp(`(${word})`, 'g');
-        highlightedText = highlightedText.replace(regex, `<span class="bg-yellow-300 text-black px-1 rounded">$1</span>`);
-      });
-      
-      return highlightedText;
-    };
-
     return (
       <div className={`min-h-screen flex flex-col items-center p-4 transition-colors duration-300 font-sans ${themeClass} ${isDarkMode ? 'dark' : ''}`}>
         <Header />
@@ -1571,7 +1677,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                     <div 
                       className="text-xl leading-relaxed mb-4"
                       dangerouslySetInnerHTML={{ 
-                        __html: highlightFlashcardWords(paragraphData?.chinese || '') 
+                        __html: highlightedParagraphHtml
                       }}
                     />
                   </div>
@@ -1650,11 +1756,21 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                           const userAnswer = questionAnswers[qIndex];
                           const hasAnswered = userAnswer !== undefined;
                           const isCorrect = hasAnswered && userAnswer === question.correct_answer;
+                          const translationVisible = !!visibleTranslations[qIndex];
                           
                           return (
                             <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
-                              <div className="font-bold text-indigo-600 mb-2">{qIndex + 1}. {question.question}</div>
-                              {question.question_english && (
+                              <div className="flex items-start justify-between gap-3 mb-2">
+                                <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
+                                <button
+                                  onClick={() => setVisibleTranslations(prev => ({ ...prev, [qIndex]: !prev[qIndex] }))}
+                                  className={`p-2 rounded-lg border transition-colors ${isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
+                                  title={translationVisible ? 'Hide translations' : 'Show translations'}
+                                >
+                                  {translationVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                                </button>
+                              </div>
+                              {translationVisible && question.question_english && (
                                 <div className="text-sm text-slate-500 mb-3 italic">{question.question_english}</div>
                               )}
                               
@@ -1692,7 +1808,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                                         {showCorrectness && isCorrectOption && <CheckCircle2 className="text-emerald-500" />}
                                         {showCorrectness && isSelected && !isCorrectOption && <XCircle className="text-red-500" />}
                                       </button>
-                                      {question.options_english && question.options_english[oIndex] && (
+                                      {translationVisible && question.options_english && question.options_english[oIndex] && (
                                         <div className="text-sm text-slate-500 ml-3 italic">{question.options_english[oIndex]}</div>
                                       )}
                                     </div>
@@ -1743,25 +1859,11 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
 
 
   if (isFinished) {
-    const totalCards = cards.length;
-    const correctCount = cardStatuses.filter(s => s === 'correct').length;
-    const percentage = (correctCount / totalCards) * 100;
-    
-    // Calculate Stars
-    let stars = 0;
-    if (percentage >= 20) stars = 1;
-    if (percentage >= 40) stars = 2;
-    if (percentage >= 60) stars = 3;
-    if (percentage >= 80) stars = 4;
-    if (percentage === 100) stars = 5;
+    const { stars, reviewCards } = sessionSummary;
 
     // Emoji Logic
     const Emoji = stars >= 4 ? Smile : stars >= 2 ? Meh : Frown;
     const emojiColor = stars >= 4 ? 'text-emerald-500' : stars >= 2 ? 'text-yellow-500' : 'text-slate-400';
-
-    // Get indices for Review (Wrong or Missed)
-    const reviewIndices = cardStatuses.map((s, i) => (s === 'wrong' || s === 'missed') ? i : -1).filter(i => i !== -1);
-    const reviewCards = reviewIndices.map(i => ({...cards[i], status: cardStatuses[i]}));
 
     return (
       <div className={`min-h-screen flex flex-col items-center justify-center p-6 relative overflow-hidden ${themeClass}`}>
@@ -1859,6 +1961,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
   }
 
   // --- Settings Modal Component ---
+  // Includes API key management + lightweight connection validation.
   const SettingsModal = () => {
     const [testStatus, setTestStatus] = useState(null);
 
@@ -1945,10 +2048,10 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
             </div>
             <div className="flex items-center gap-4">
                <div className="flex items-center gap-1 text-red-500">
-                 <XCircle size={16} /> {cardStatuses.filter(s => s === 'wrong').length}
+                 <XCircle size={16} /> {statusStats.wrong}
                </div>
                <div className="flex items-center gap-1 text-yellow-500">
-                 <AlertTriangle size={16} /> {cardStatuses.filter(s => s === 'missed').length}
+                 <AlertTriangle size={16} /> {statusStats.missed}
                </div>
             </div>
           </div>
