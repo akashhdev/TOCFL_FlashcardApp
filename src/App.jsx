@@ -333,11 +333,26 @@ export default function App() {
   const [questionAnswers, setQuestionAnswers] = useState({});
   const [visibleTranslations, setVisibleTranslations] = useState({}); // Track which translations are visible
 
+  // Conversation Practice State
+  const [conversationConfig, setConversationConfig] = useState({ level: 'A', length: 'short', useCurrentDeck: false, familiarity: 1, includeQuestions: true });
+  const [conversationData, setConversationData] = useState({
+    title: '日常對話',
+    conversation: [],
+    questions: [],
+    words: []
+  });
+  const [conversationLoadingStatus, setConversationLoadingStatus] = useState('');
+  const [conversationVisibleTurns, setConversationVisibleTurns] = useState(0);
+  const [conversationQuestionAnswers, setConversationQuestionAnswers] = useState({});
+  const [conversationVisibleTranslations, setConversationVisibleTranslations] = useState({});
+  const [playingTurnIndex, setPlayingTurnIndex] = useState(null);
+
   // Session Summary State
   const [revealedReviewItems, setRevealedReviewItems] = useState({});
 
   const fileInputRef = useRef(null);
   const currentCard = cards[currentIndex] || {};
+  const speakerVoicePreferenceRef = useRef({});
 
   // --- Initialization ---
   useEffect(() => {
@@ -547,15 +562,28 @@ export default function App() {
   };
 
   // --- AI Actions ---
+  const playGeminiTTS = async (text) => {
+    if (!effectiveKey) throw new Error('No Gemini API key for TTS fallback');
+
+    const audioData = await generateTTS(text, effectiveKey);
+    if (!audioData) throw new Error('Gemini TTS fallback failed');
+
+    const blob = pcmToWav(audioData.data);
+    const audio = new Audio(URL.createObjectURL(blob));
+    await audio.play();
+  };
+
   const handleTTS = async (text) => {
     if (!text) return;
-    const audioData = await generateTTS(text, effectiveKey);
-    if (audioData) {
-      const blob = pcmToWav(audioData.data);
-      const audio = new Audio(URL.createObjectURL(blob));
-      audio.play();
-    } else if (!effectiveKey) {
-      setShowSettings(true);
+    try {
+      await playGoogleTranslateTTS(text, {
+        speaker: null,
+        fallbackToBrowser: true,
+        fallbackToGemini: !!effectiveKey,
+      });
+    } catch (err) {
+      console.error('Word TTS failed:', err);
+      if (!effectiveKey) setShowSettings(true);
     }
   };
 
@@ -700,6 +728,236 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
     }
   };
 
+  // --- Conversation Practice Logic ---
+  const playBrowserSpeechSynthesis = (text, speaker = null) => new Promise((resolve, reject) => {
+    if (!('speechSynthesis' in window)) {
+      reject(new Error('Speech synthesis is not supported in this browser'));
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-TW';
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+
+    const voices = window.speechSynthesis.getVoices();
+    const zhVoices = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('zh'));
+
+    if (speaker && !speakerVoicePreferenceRef.current[speaker]) {
+      const existingCount = Object.keys(speakerVoicePreferenceRef.current).length;
+      speakerVoicePreferenceRef.current[speaker] = existingCount % 2 === 0 ? 'female' : 'male';
+    }
+
+    const preference = speaker ? speakerVoicePreferenceRef.current[speaker] : null;
+    const femaleVoiceRegex = /(female|woman|girl|zira|samantha|ting|mei|xiao|hui|luna)/i;
+    const maleVoiceRegex = /(male|man|boy|david|mark|george|james|liam|jun|gang|yun)/i;
+
+    let preferredVoice = null;
+    if (preference === 'female') {
+      preferredVoice = zhVoices.find((voice) => femaleVoiceRegex.test(voice.name));
+    }
+    if (!preferredVoice && preference === 'male') {
+      preferredVoice = zhVoices.find((voice) => maleVoiceRegex.test(voice.name));
+    }
+    if (!preferredVoice && zhVoices.length > 0) {
+      preferredVoice = zhVoices[0];
+    }
+    if (preferredVoice) utterance.voice = preferredVoice;
+
+    const timeoutId = setTimeout(() => {
+      window.speechSynthesis.cancel();
+      reject(new Error('Speech synthesis timeout'));
+    }, 15000);
+
+    utterance.onend = () => {
+      clearTimeout(timeoutId);
+      resolve();
+    };
+
+    utterance.onerror = (event) => {
+      clearTimeout(timeoutId);
+      reject(new Error(event.error || 'Speech synthesis failed'));
+    };
+
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  });
+
+  const playGoogleTranslateTTS = async (
+    text,
+    {
+      speaker = null,
+      fallbackToBrowser = true,
+      fallbackToGemini = false,
+    } = {}
+  ) => {
+    if (!text?.trim()) return;
+
+    const chunks = text
+      .split(/(?<=[。！？!?])/)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+      .flatMap((chunk) => {
+        if (chunk.length <= 110) return [chunk];
+        const parts = [];
+        let current = '';
+        for (const token of chunk.split(/([，,；;])/)) {
+          if ((current + token).length > 110 && current) {
+            parts.push(current.trim());
+            current = token;
+          } else {
+            current += token;
+          }
+        }
+        if (current.trim()) parts.push(current.trim());
+        return parts;
+      });
+
+    const playChunk = (chunk) => new Promise((resolve, reject) => {
+      const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-TW&q=${encodeURIComponent(chunk)}`;
+      const audio = new Audio(url);
+      const timeoutId = setTimeout(() => {
+        audio.pause();
+        reject(new Error('Google TTS request timeout'));
+      }, 12000);
+
+      audio.preload = 'auto';
+      audio.onended = () => {
+        clearTimeout(timeoutId);
+        resolve();
+      };
+      audio.onerror = () => {
+        clearTimeout(timeoutId);
+        reject(new Error('Google TTS audio playback failed'));
+      };
+      audio.play().catch(reject);
+    });
+
+    try {
+      for (const chunk of chunks) {
+        // eslint-disable-next-line no-await-in-loop
+        await playChunk(chunk);
+      }
+    } catch (err) {
+      if (fallbackToBrowser) {
+        try {
+          await playBrowserSpeechSynthesis(text, speaker);
+          return;
+        } catch {
+          // Continue to next fallback.
+        }
+      }
+      if (fallbackToGemini) {
+        await playGeminiTTS(text);
+        return;
+      }
+      throw err;
+    }
+  };
+
+  const playConversationTurn = async (turn, index) => {
+    if (!turn?.text) return;
+    setPlayingTurnIndex(index);
+    try {
+      try {
+        // Prefer browser speech here so different speakers can use different voices.
+        await playBrowserSpeechSynthesis(turn.text, turn.speaker);
+      } catch {
+        await playGoogleTranslateTTS(turn.text, {
+          speaker: turn.speaker,
+          fallbackToBrowser: false,
+          fallbackToGemini: !!effectiveKey,
+        });
+      }
+    } finally {
+      setPlayingTurnIndex(null);
+    }
+  };
+
+  const startConversationGeneration = async () => {
+    if (!effectiveKey) { setShowSettings(true); return; }
+    setAppMode('conversation-loading');
+    setConversationLoadingStatus('Generating conversation...');
+
+    setConversationVisibleTurns(0);
+    setConversationQuestionAnswers({});
+    setConversationVisibleTranslations({});
+
+    let vocabContext = '';
+    if (conversationConfig.useCurrentDeck) {
+      const deckWords = cards.map(c => c.char).join(', ');
+      const familiarityLevels = {
+        1: 'Use deck words naturally and balanced.',
+        2: 'Use deck words with slight repetition.',
+        3: 'Use deck words moderately with some repetition.',
+        4: 'Prioritize deck words with high repetition.',
+        5: 'Maximize deck-word repetition while still natural.'
+      };
+      vocabContext = `Vocabulary constraint: [${deckWords}]. ${familiarityLevels[conversationConfig.familiarity]}`;
+    }
+
+    const turnMap = {
+      short: '6-8 turns',
+      medium: '9-12 turns',
+      long: '13-16 turns'
+    };
+
+    const prompt = `Generate a TOCFL Band ${conversationConfig.level} listening conversation in traditional Chinese.
+${vocabContext}
+Conversation length: ${turnMap[conversationConfig.length]}.
+Use 2-3 speakers with clear names.
+Return JSON only.
+JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","text":"..."}]${conversationConfig.includeQuestions ? ',"questions":[{"question":"...","question_english":"...","options":["A)...","B)...","C)..."],"options_english":["A)...","B)...","C)..."],"correct_answer":"A","explanation":"..."}]' : ''}}`;
+
+    try {
+      const response = await callGemini(
+        prompt,
+        'You are a TOCFL listening-test writer. Output concise, valid JSON only.',
+        effectiveKey,
+        'application/json'
+      );
+
+      const cleaned = response.replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      if (!Array.isArray(parsed.conversation) || parsed.conversation.length === 0) {
+        throw new Error('No conversation turns generated');
+      }
+
+      setConversationData({
+        title: parsed.title || 'Listening Conversation',
+        conversation: parsed.conversation,
+        questions: parsed.questions || [],
+        words: cards.map(c => c.char)
+      });
+      setAppMode('conversation-practice');
+    } catch (e) {
+      console.error('Conversation Generation Failed:', e);
+      setConversationLoadingStatus(`Error: ${e.message}`);
+      setTimeout(() => setAppMode('flashcards'), 2000);
+    }
+  };
+
+  useEffect(() => {
+    if (appMode !== 'conversation-practice') return;
+
+    const turns = conversationData?.conversation || [];
+    if (turns.length === 0) return;
+
+    setConversationVisibleTurns(0);
+    const id = setInterval(() => {
+      setConversationVisibleTurns(prev => {
+        if (prev >= turns.length) {
+          clearInterval(id);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, 1500);
+
+    return () => clearInterval(id);
+  }, [appMode, conversationData]);
+
   // --- Helpers ---
   const formatTime = (seconds) => {
     const m = Math.floor(seconds / 60);
@@ -734,7 +992,13 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
           onClick={() => setAppMode('paragraph-setup')} 
           className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${appMode.includes('paragraph') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
         >
-          Paragraph Practice
+          Paragraph
+        </button>
+        <button 
+          onClick={() => setAppMode('conversation-setup')} 
+          className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${appMode.includes('conversation') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
+        >
+          Conversation
         </button>
       </div>
 
@@ -925,6 +1189,345 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
         </div>
         <h3 className="text-3xl font-black mb-4">Generating Paragraph</h3>
         <p className="text-slate-500 font-medium animate-pulse">{paragraphLoadingStatus}</p>
+      </div>
+    );
+  }
+
+  if (appMode === 'conversation-setup') {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-6 ${themeClass}`}>
+        <Header />
+        <div className={`max-w-md w-full rounded-3xl p-8 shadow-2xl ${cardBg} border`}>
+          <h2 className="text-2xl font-black mb-8 flex items-center gap-2">
+            <MessageCircle className="text-indigo-500" /> Conversation Practice Setup
+          </h2>
+
+          <div className="space-y-6">
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Flashcard Set</label>
+              <div className="space-y-3">
+                <button
+                  onClick={() => fileInputRef.current.click()}
+                  className="w-full py-3 px-4 rounded-xl border-2 border-dashed border-slate-400 hover:border-indigo-500 transition-colors flex items-center justify-center gap-2 text-slate-500 hover:text-indigo-500"
+                >
+                  <Upload size={20} />
+                  Upload Flashcard Set (.csv, .txt, .docx)
+                </button>
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx" />
+
+                <div className={`p-3 rounded-xl text-sm ${cards.length > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800/50 text-slate-400'}`}>
+                  {cards.length > 0 ? `${cards.length} flashcards loaded` : 'No flashcards loaded - will use default set'}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">TOCFL Band Level</label>
+              <div className="grid grid-cols-3 gap-3">
+                {['A', 'B', 'C'].map(l => (
+                  <button key={l} onClick={() => setConversationConfig(c => ({...c, level: l}))}
+                    className={`py-3 rounded-xl font-bold border-2 transition-all ${conversationConfig.level === l ? 'border-indigo-500 bg-indigo-500/10 text-indigo-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
+                    Band {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Conversation Length</label>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { key: 'short', label: 'Short', desc: '6-8 turns' },
+                  { key: 'medium', label: 'Medium', desc: '9-12 turns' },
+                  { key: 'long', label: 'Long', desc: '13-16 turns' }
+                ].map(({ key, label, desc }) => (
+                  <button key={key} onClick={() => setConversationConfig(c => ({...c, length: key}))}
+                    className={`py-3 rounded-xl font-bold border-2 transition-all text-center ${conversationConfig.length === key ? 'border-emerald-500 bg-emerald-500/10 text-emerald-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
+                    <div>{label}</div>
+                    <div className="text-xs opacity-60">{desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div
+              onClick={() => setConversationConfig(c => ({...c, useCurrentDeck: !c.useCurrentDeck}))}
+              className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex items-center justify-between group ${conversationConfig.useCurrentDeck ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-800 bg-slate-800/50'}`}
+            >
+              <div className="flex items-center gap-3">
+                <BookOpen size={20} className={conversationConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-500'} />
+                <div>
+                  <div className={`font-bold text-sm ${conversationConfig.useCurrentDeck ? 'text-indigo-500' : 'text-slate-400'}`}>Use Flashcard Vocabulary</div>
+                  <div className="text-xs opacity-60">Incorporate words from your flashcard set</div>
+                </div>
+              </div>
+              <div className={`w-6 h-6 rounded-md flex items-center justify-center border transition-colors ${conversationConfig.useCurrentDeck ? 'bg-indigo-500 border-indigo-500' : 'border-slate-600'}`}>
+                {conversationConfig.useCurrentDeck && <CheckSquare size={16} className="text-white" />}
+              </div>
+            </div>
+
+            {conversationConfig.useCurrentDeck && (() => {
+              const minFlashcards = { short: 50, medium: 80, long: 120 }[conversationConfig.length];
+              const hasEnoughFlashcards = cards.length >= minFlashcards;
+
+              return hasEnoughFlashcards ? (
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Vocabulary Familiarity</label>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-400">Normal</span>
+                      <span className="text-slate-400">Very Familiar</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="5"
+                      value={conversationConfig.familiarity}
+                      onChange={(e) => setConversationConfig(c => ({...c, familiarity: parseInt(e.target.value)}))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                      style={{
+                        background: `linear-gradient(to right, #6366f1 0%, #6366f1 ${(conversationConfig.familiarity - 1) * 25}%, #374151 ${(conversationConfig.familiarity - 1) * 25}%, #374151 100%)`
+                      }}
+                    />
+                    <div className="flex justify-between text-xs text-slate-500">
+                      <span>1</span>
+                      <span>2</span>
+                      <span>3</span>
+                      <span>4</span>
+                      <span>5</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-orange-500/10 p-4 rounded-xl border border-orange-500/20 text-orange-500 text-sm">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle size={16} />
+                    <span className="font-medium">Need {minFlashcards - cards.length} more flashcards</span>
+                  </div>
+                  <p className="mt-1">Add more flashcards to unlock vocabulary familiarity controls for {conversationConfig.length} conversations.</p>
+                </div>
+              );
+            })()}
+
+            <div
+              onClick={() => setConversationConfig(c => ({...c, includeQuestions: !c.includeQuestions}))}
+              className={`p-4 rounded-xl border-2 transition-all cursor-pointer flex items-center justify-between group ${conversationConfig.includeQuestions ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-800 bg-slate-800/50'}`}
+            >
+              <div className="flex items-center gap-3">
+                <CheckSquare size={20} className={conversationConfig.includeQuestions ? 'text-emerald-500' : 'text-slate-500'} />
+                <div>
+                  <div className={`font-bold text-sm ${conversationConfig.includeQuestions ? 'text-emerald-500' : 'text-slate-400'}`}>Include Listening Questions</div>
+                  <div className="text-xs opacity-60">Generate 3-5 questions after the conversation</div>
+                </div>
+              </div>
+              <div className={`w-6 h-6 rounded-md flex items-center justify-center border transition-colors ${conversationConfig.includeQuestions ? 'bg-emerald-500 border-emerald-500' : 'border-slate-600'}`}>
+                {conversationConfig.includeQuestions && <CheckSquare size={16} className="text-white" />}
+              </div>
+            </div>
+
+            <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm flex gap-3">
+              <AlertCircle className="shrink-0" />
+              <p>Generates a listening conversation transcript with speakers and optional questions. Playback uses browser audio.</p>
+            </div>
+
+            <button onClick={startConversationGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
+              Generate Conversation
+            </button>
+          </div>
+        </div>
+        {showSettings && <SettingsModal />}
+      </div>
+    );
+  }
+
+  if (appMode === 'conversation-loading') {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-8 ${themeClass}`}>
+        <div className="relative mb-8">
+          <Loader2 size={80} className="animate-spin text-indigo-500" />
+          <Sparkles className="absolute top-0 right-0 text-amber-400 animate-pulse" />
+        </div>
+        <h3 className="text-3xl font-black mb-4">Generating Conversation</h3>
+        <p className="text-slate-500 font-medium animate-pulse">{conversationLoadingStatus}</p>
+      </div>
+    );
+  }
+
+  if (appMode === 'conversation-practice') {
+    const visibleTurns = conversationData.conversation.slice(0, conversationVisibleTurns);
+    const conversationComplete = conversationVisibleTurns >= conversationData.conversation.length;
+    const speakerOrder = [...new Set(conversationData.conversation.map(t => t.speaker))];
+
+    return (
+      <div className={`min-h-screen flex flex-col items-center p-4 transition-colors duration-300 font-sans ${themeClass} ${isDarkMode ? 'dark' : ''}`}>
+        <Header />
+
+        <main className="w-full max-w-4xl flex-1 flex flex-col justify-center">
+          <div className="w-full max-w-4xl flex flex-col gap-6 mb-4">
+            <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+              <div className="text-center">
+                <h2 className="text-2xl font-black text-indigo-600 mb-2">Listening Conversation</h2>
+                <p className="text-sm text-slate-500">
+                  TOCFL Band {conversationConfig.level} • {conversationConfig.length} conversation
+                </p>
+                <p className="text-sm mt-2 font-semibold">{conversationData.title}</p>
+              </div>
+
+              <div className="space-y-3 max-h-[480px] overflow-y-auto pr-2">
+                {visibleTurns.map((turn, index) => {
+                  const speakerIdx = speakerOrder.indexOf(turn.speaker);
+                  const isLeft = speakerIdx % 2 === 0;
+                  const isPlaying = playingTurnIndex === index;
+
+                  return (
+                    <div key={`${turn.speaker}-${index}`} className={`flex ${isLeft ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`max-w-[80%] rounded-2xl p-4 border ${isLeft
+                        ? isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'
+                        : 'bg-indigo-600 text-white border-indigo-500'}`}>
+                        <div className="flex items-center justify-between gap-3 mb-1">
+                          <span className={`text-xs font-bold uppercase tracking-wider ${isLeft ? 'text-indigo-500' : 'text-white/80'}`}>
+                            {turn.speaker}
+                          </span>
+                          <button
+                            onClick={() => playConversationTurn(turn, index)}
+                            className={`p-1.5 rounded-lg ${isLeft ? isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-white text-slate-600 hover:text-indigo-600' : 'bg-white/15 text-white hover:bg-white/25'}`}
+                            title="Play dialogue"
+                          >
+                            {isPlaying ? <Loader2 size={14} className="animate-spin" /> : <Volume2 size={14} />}
+                          </button>
+                        </div>
+                        <p className="text-base leading-relaxed">{turn.text}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {!conversationComplete && (
+                  <div className="text-center text-sm text-slate-500 italic animate-pulse">Playing transcript...</div>
+                )}
+              </div>
+
+              {conversationComplete && conversationData.conversation.length > 0 && (
+                <div className="flex justify-center">
+                  <button
+                    onClick={async () => {
+                      for (let i = 0; i < conversationData.conversation.length; i += 1) {
+                        // eslint-disable-next-line no-await-in-loop
+                        await playConversationTurn(conversationData.conversation[i], i);
+                      }
+                    }}
+                    className="px-6 py-3 rounded-xl font-bold bg-blue-600 text-white hover:bg-blue-500 transition-all flex items-center gap-2"
+                  >
+                    <Volume2 size={18} /> Play Full Conversation
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {conversationComplete && conversationData?.questions && conversationData.questions.length > 0 && (
+              <div className="w-full max-w-4xl mt-2">
+                <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                  <div className="text-center mb-6">
+                    <h3 className="text-xl font-black text-indigo-600 mb-2">Listening Questions</h3>
+                    <p className="text-sm text-slate-500">Answer after listening to the full conversation</p>
+                  </div>
+
+                  <div className="space-y-6">
+                    {conversationData.questions.map((question, qIndex) => {
+                      const userAnswer = conversationQuestionAnswers[qIndex];
+                      const hasAnswered = userAnswer !== undefined;
+                      const isCorrect = hasAnswered && userAnswer === question.correct_answer;
+                      const translationVisible = !!conversationVisibleTranslations[qIndex];
+
+                      return (
+                        <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
+                          <div className="flex items-start justify-between gap-3 mb-2">
+                            <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
+                            <button
+                              onClick={() => setConversationVisibleTranslations(prev => ({ ...prev, [qIndex]: !prev[qIndex] }))}
+                              className={`p-2 rounded-lg border transition-colors ${isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
+                              title={translationVisible ? 'Hide translations' : 'Show translations'}
+                            >
+                              {translationVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                            </button>
+                          </div>
+                          {translationVisible && question.question_english && (
+                            <div className="text-sm text-slate-500 mb-3 italic">{question.question_english}</div>
+                          )}
+
+                          <div className="space-y-2">
+                            {question.options.map((option, oIndex) => {
+                              const optionLetter = String.fromCharCode(65 + oIndex);
+                              const isSelected = userAnswer === optionLetter;
+                              const isCorrectOption = optionLetter === question.correct_answer;
+                              const showCorrectness = hasAnswered;
+
+                              let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+                              if (showCorrectness) {
+                                if (isCorrectOption) optionClass = 'bg-emerald-500/20 border-emerald-500';
+                                else if (isSelected && !isCorrectOption) optionClass = 'bg-red-500/20 border-red-500';
+                              } else {
+                                optionClass += ' hover:bg-indigo-600 hover:text-white hover:border-indigo-600';
+                              }
+
+                              return (
+                                <div key={oIndex} className="space-y-1">
+                                  <button
+                                    onClick={() => {
+                                      if (!hasAnswered) {
+                                        setConversationQuestionAnswers(prev => ({...prev, [qIndex]: optionLetter}));
+                                      }
+                                    }}
+                                    disabled={hasAnswered}
+                                    className={`w-full p-3 text-left rounded-xl transition-all font-bold border group flex justify-between items-center ${optionClass}`}
+                                  >
+                                    <span>{option}</span>
+                                    {showCorrectness && isCorrectOption && <CheckCircle2 className="text-emerald-500" />}
+                                    {showCorrectness && isSelected && !isCorrectOption && <XCircle className="text-red-500" />}
+                                  </button>
+                                  {translationVisible && question.options_english && question.options_english[oIndex] && (
+                                    <div className="text-sm text-slate-500 ml-3 italic">{question.options_english[oIndex]}</div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {hasAnswered && question.explanation && (
+                            <div className="mt-4 p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
+                              <div className="font-bold text-indigo-600 text-sm mb-1">Explanation:</div>
+                              <div className="text-sm text-slate-600">{question.explanation}</div>
+                              <div className={`mt-2 text-sm font-bold ${isCorrect ? 'text-emerald-600' : 'text-red-600'}`}>
+                                {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${question.correct_answer}.`}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={() => setAppMode('conversation-setup')}
+                className="px-8 py-4 rounded-xl bg-slate-600 hover:bg-slate-500 text-white font-bold transition-all shadow-lg shadow-slate-500/20 active:scale-95"
+              >
+                New Conversation
+              </button>
+
+              <button
+                onClick={() => setAppMode('flashcards')}
+                className="px-8 py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all shadow-lg shadow-indigo-500/25 active:scale-95"
+              >
+                Back to Flashcards
+              </button>
+            </div>
+          </div>
+        </main>
+        {showSettings && <SettingsModal />}
       </div>
     );
   }
