@@ -1047,23 +1047,11 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
                           const userAnswer = questionAnswers[qIndex];
                           const hasAnswered = userAnswer !== undefined;
                           const isCorrect = hasAnswered && userAnswer === question.correct_answer;
-                          const showQuestionTranslation = visibleTranslations[`question-${qIndex}`];
                           
                           return (
                             <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
-                              <div className="flex items-center justify-between mb-2">
-                                <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
-                                {question.question_english && (
-                                  <button
-                                    onClick={() => setVisibleTranslations(prev => ({...prev, [`question-${qIndex}`]: !prev[`question-${qIndex}`]}))}
-                                    className="ml-2 p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                                    title={showQuestionTranslation ? "Hide translation" : "Show translation"}
-                                  >
-                                    {showQuestionTranslation ? <EyeOff className="w-4 h-4 text-slate-500" /> : <Eye className="w-4 h-4 text-slate-500" />}
-                                  </button>
-                                )}
-                              </div>
-                              {question.question_english && showQuestionTranslation && (
+                              <div className="font-bold text-indigo-600 mb-2">{qIndex + 1}. {question.question}</div>
+                              {question.question_english && (
                                 <div className="text-sm text-slate-500 mb-3 italic">{question.question_english}</div>
                               )}
                               
@@ -1073,7 +1061,6 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
                                   const isSelected = userAnswer === optionLetter;
                                   const isCorrectOption = optionLetter === question.correct_answer;
                                   const showCorrectness = hasAnswered;
-                                  const showOptionTranslation = visibleTranslations[`option-${qIndex}-${oIndex}`];
                                   
                                   let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
                                   
@@ -1089,36 +1076,20 @@ Format as JSON: {"pinyin": "pinyin text", "english": "english translation"}`;
 
                                   return (
                                     <div key={oIndex} className="space-y-1">
-                                      <div className="flex items-center justify-between">
-                                        <button
-                                          onClick={() => {
-                                            if (!hasAnswered) {
-                                              setQuestionAnswers(prev => ({...prev, [qIndex]: optionLetter}));
-                                            }
-                                          }}
-                                          disabled={hasAnswered}
-                                          className={`flex-1 p-3 text-left rounded-xl transition-all font-bold border group flex justify-between items-center ${optionClass}`}
-                                        >
-                                          <span>{option}</span>
-                                          <div className="flex items-center space-x-2">
-                                            {question.options_english && question.options_english[oIndex] && (
-                                              <button
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  setVisibleTranslations(prev => ({...prev, [`option-${qIndex}-${oIndex}`]: !prev[`option-${qIndex}-${oIndex}`]}));
-                                                }}
-                                                className="p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-                                                title={showOptionTranslation ? "Hide translation" : "Show translation"}
-                                              >
-                                                {showOptionTranslation ? <EyeOff className="w-3 h-3 text-slate-500" /> : <Eye className="w-3 h-3 text-slate-500" />}
-                                              </button>
-                                            )}
-                                            {showCorrectness && isCorrectOption && <CheckCircle2 className="text-emerald-500" />}
-                                            {showCorrectness && isSelected && !isCorrectOption && <XCircle className="text-red-500" />}
-                                          </div>
-                                        </button>
-                                      </div>
-                                      {question.options_english && question.options_english[oIndex] && showOptionTranslation && (
+                                      <button
+                                        onClick={() => {
+                                          if (!hasAnswered) {
+                                            setQuestionAnswers(prev => ({...prev, [qIndex]: optionLetter}));
+                                          }
+                                        }}
+                                        disabled={hasAnswered}
+                                        className={`w-full p-3 text-left rounded-xl transition-all font-bold border group flex justify-between items-center ${optionClass}`}
+                                      >
+                                        <span>{option}</span>
+                                        {showCorrectness && isCorrectOption && <CheckCircle2 className="text-emerald-500" />}
+                                        {showCorrectness && isSelected && !isCorrectOption && <XCircle className="text-red-500" />}
+                                      </button>
+                                      {question.options_english && question.options_english[oIndex] && (
                                         <div className="text-sm text-slate-500 ml-3 italic">{question.options_english[oIndex]}</div>
                                       )}
                                     </div>
