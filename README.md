@@ -9,8 +9,8 @@
 
 Generate your own tocfl practice paragraph based on your difficulty level. You can even add your own flashcards to make the paragraph more familiar and focused on your practice set! 
 
-<img width="1352" height="1027" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-1.png" />
-<img width="1352" height="1027" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-2.png" />
+<img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-1.png" />
+<img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-2.png" />
 
 
 
