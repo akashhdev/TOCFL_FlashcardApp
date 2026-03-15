@@ -5,6 +5,14 @@
 <img width="1338" height="1289" alt="image" src="https://github.com/user-attachments/assets/4715ba84-14fc-4489-b857-3f4b9426120b" />
 <img width="1352" height="1027" alt="image" src="https://github.com/user-attachments/assets/1a4d6685-1ff8-4b2f-b0b0-c20350c4e062" />
 
+# Paragraph Practice Mode
+
+Generate your own tocfl practice paragraph based on your difficulty level. You can even add your own flashcards to make the paragraph more familiar and focused on your practice set! 
+
+<img width="1352" height="1027" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-1.png" />
+<img width="1352" height="1027" alt="image" src="src/assets/Demo-images/tocfl-prep-app-para-practice-2.png" />
+
+
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
