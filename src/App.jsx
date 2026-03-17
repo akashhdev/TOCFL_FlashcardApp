@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   ChevronLeft, ChevronRight, RotateCcw, Sparkles, MessageCircle, Send, 
-  Loader2, X, Moon, Sun, Upload, Volume2, VolumeX, 
+  Loader2, X, Moon, Sun, Upload, Download, Volume2, VolumeX, 
   Trophy, AlertCircle, Eye, EyeOff, RefreshCw, BrainCircuit,
   GraduationCap, Star, Smile, Frown, Meh, AlertTriangle, XCircle,
   BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap
@@ -350,6 +350,7 @@ export default function App() {
   // API key sources: user-entered key (localStorage) overrides env key.
   const [customKey, setCustomKey] = useState(() => localStorage.getItem('gemini_key') || "");
   const [showSettings, setShowSettings] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState(() => localStorage.getItem('tocfl_mode') === 'offline');
   
   const effectiveKey = customKey || envApiKey;
 
@@ -468,6 +469,17 @@ export default function App() {
     localStorage.setItem('gemini_key', trimmedKey);
   };
 
+  const toggleOfflineMode = () => {
+    setIsOfflineMode((prev) => {
+      const next = !prev;
+      localStorage.setItem('tocfl_mode', next ? 'offline' : 'online');
+      if (next) {
+        setShowChat(false);
+      }
+      return next;
+    });
+  };
+
   // --- Keyboard Shortcuts ---
   // Scope is primarily flashcard mode to avoid mode-crossing key collisions.
   const handleKeyDown = useCallback((e) => {
@@ -499,15 +511,17 @@ export default function App() {
       }
       
       if (e.key === 'Tab') {
+        if (isOfflineMode) return;
         e.preventDefault();
         setShowChat(true);
       }
       if (e.key === 'Shift') {
+        if (isOfflineMode) return;
         e.preventDefault();
         generateSmartSentence();
       }
     }
-  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings]);
+  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings, isOfflineMode]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -631,6 +645,69 @@ export default function App() {
     }
   };
 
+  const downloadParagraphSnapshot = () => {
+    if (!paragraphData?.chinese?.trim()) return;
+
+    const snapshot = {
+      app: 'TOCFL Prep',
+      type: 'paragraph-snapshot',
+      version: 1,
+      savedAt: new Date().toISOString(),
+      paragraphConfig,
+      paragraphData: {
+        chinese: paragraphData.chinese,
+        pinyin: paragraphData.pinyin || '',
+        english: paragraphData.english || '',
+        questions: Array.isArray(paragraphData.questions) ? paragraphData.questions : [],
+        words: Array.isArray(paragraphData.words) ? paragraphData.words : []
+      }
+    };
+
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `tocfl-paragraph-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.1);
+  };
+
+  const downloadConversationSnapshot = () => {
+    if (!Array.isArray(conversationData?.conversation) || conversationData.conversation.length === 0) return;
+
+    const snapshot = {
+      app: 'TOCFL Prep',
+      type: 'conversation-snapshot',
+      version: 1,
+      savedAt: new Date().toISOString(),
+      conversationConfig,
+      conversationData: {
+        title: conversationData.title || 'Listening Conversation',
+        conversation: conversationData.conversation,
+        questions: Array.isArray(conversationData.questions) ? conversationData.questions : [],
+        words: Array.isArray(conversationData.words) ? conversationData.words : []
+      }
+    };
+
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `tocfl-conversation-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.1);
+  };
+
   // --- File Handling ---
   // Accepts CSV/TXT/DOCX and normalizes to internal deck shape.
   const handleFileUpload = async (e) => {
@@ -654,8 +731,110 @@ export default function App() {
       }).filter(Boolean);
     };
 
+    const applyParagraphSnapshot = (payload) => {
+      const snapshotConfig = payload?.paragraphConfig || {};
+      const snapshotData = payload?.paragraphData || {};
+      if (!snapshotData?.chinese || typeof snapshotData.chinese !== 'string') return false;
+
+      setParagraphConfig(prev => ({
+        ...prev,
+        ...snapshotConfig,
+        familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
+      }));
+
+      setParagraphData({
+        chinese: snapshotData.chinese,
+        pinyin: snapshotData.pinyin || '',
+        english: snapshotData.english || '',
+        questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
+        words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
+      });
+
+      setShowPinyin(false);
+      setShowEnglish(false);
+      setHighlightWords(false);
+      setQuestionAnswers({});
+      setVisibleTranslations({});
+      setAppMode('paragraph-practice');
+      return true;
+    };
+
+    const applyConversationSnapshot = (payload) => {
+      const snapshotConfig = payload?.conversationConfig || {};
+      const snapshotData = payload?.conversationData || {};
+      if (!Array.isArray(snapshotData.conversation) || snapshotData.conversation.length === 0) return false;
+
+      const normalizedConversation = snapshotData.conversation
+        .map((turn) => {
+          const speaker = String(turn?.speaker || '').trim();
+          const text = String(turn?.text || '').trim();
+          if (!speaker || !text) return null;
+          return { speaker, text };
+        })
+        .filter(Boolean);
+
+      if (!normalizedConversation.length) return false;
+
+      setConversationConfig(prev => ({
+        ...prev,
+        ...snapshotConfig,
+        familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
+      }));
+
+      setConversationData({
+        title: String(snapshotData.title || 'Listening Conversation'),
+        conversation: normalizedConversation,
+        questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
+        words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
+      });
+
+      setConversationVisibleTurns(0);
+      setConversationQuestionAnswers({});
+      setConversationVisibleTranslations({});
+      setPlayingTurnIndex(null);
+      speakerVoicePreferenceRef.current = {};
+      setAppMode('conversation-practice');
+      return true;
+    };
+
+    const applyDeckFromJson = (payload) => {
+      if (!Array.isArray(payload)) return false;
+      const deck = payload
+        .map((item, idx) => {
+          if (!item || typeof item !== 'object') return null;
+          const char = String(item.char || '').trim();
+          if (!char) return null;
+          return {
+            id: Date.now() + idx,
+            char,
+            pinyin: String(item.pinyin || '').trim(),
+            meaning: String(item.meaning || '').trim()
+          };
+        })
+        .filter(Boolean);
+
+      if (!deck.length) return false;
+      setCards(deck);
+      resetSession(deck);
+      return true;
+    };
+
     let newDeck = [];
-    if (file.name.endsWith('.docx') && window.mammoth) {
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith('.json')) {
+      try {
+        const jsonText = await file.text();
+        const parsed = JSON.parse(jsonText);
+        const loadedParagraph = parsed?.type === 'paragraph-snapshot' && applyParagraphSnapshot(parsed);
+        const loadedConversation = !loadedParagraph && parsed?.type === 'conversation-snapshot' && applyConversationSnapshot(parsed);
+        const loadedDeck = !loadedParagraph && !loadedConversation && applyDeckFromJson(parsed);
+        if (loadedParagraph || loadedConversation || loadedDeck) return;
+      } catch (err) {
+        console.error('Invalid JSON upload:', err);
+      }
+    }
+
+    if (lowerName.endsWith('.docx') && window.mammoth) {
       const arrayBuffer = await file.arrayBuffer();
       const result = await window.mammoth.extractRawText({ arrayBuffer });
       newDeck = parseText(result.value);
@@ -700,6 +879,7 @@ export default function App() {
 
   // Generates a contextual example sentence for the active flashcard.
   const generateSmartSentence = async () => {
+    if (isOfflineMode) return;
     if (!effectiveKey) { setShowSettings(true); return; }
     setIsGenerating(true);
     try {
@@ -718,6 +898,7 @@ export default function App() {
 
   // Chat tutor bound to current card context.
   const handleChat = async (inputOverride = null) => {
+    if (isOfflineMode) return;
     if (!effectiveKey) { setShowSettings(true); return; }
     const msg = inputOverride || chatInput;
     if (!msg.trim()) return;
@@ -745,6 +926,7 @@ export default function App() {
   // 1) paragraph (+ optional questions)
   // 2) pinyin + English translation enrichment
   const startParagraphGeneration = async () => {
+    if (isOfflineMode) return;
     if (!effectiveKey) { setShowSettings(true); return; }
     setAppMode('paragraph-loading');
     setParagraphLoadingStatus("Generating paragraph...");
@@ -991,6 +1173,7 @@ ${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions"
 
   // Generates structured listening transcript + optional questions via JSON schema prompt.
   const startConversationGeneration = async () => {
+    if (isOfflineMode) return;
     if (!effectiveKey) { setShowSettings(true); return; }
     setAppMode('conversation-loading');
     setConversationLoadingStatus('Generating conversation...');
@@ -1121,20 +1304,20 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
       </div>
 
       <div className="flex gap-2">
+        <button
+          onClick={toggleOfflineMode}
+          className={`px-3 rounded-xl text-xs font-black tracking-wider transition-colors ${isOfflineMode ? 'bg-amber-500 text-white hover:bg-amber-400' : 'bg-emerald-500 text-white hover:bg-emerald-400'}`}
+          title="Toggle offline mode"
+        >
+          {isOfflineMode ? 'OFFLINE' : 'ONLINE'}
+        </button>
         <button onClick={() => setShowSettings(true)} className={`${iconBtnClass} ${!effectiveKey ? 'animate-pulse text-indigo-500 ring-2 ring-indigo-500' : ''}`}>
           <Settings size={20} />
         </button>
         <button onClick={() => fileInputRef.current.click()} className={iconBtnClass}>
           <Upload size={20} />
         </button>
-        <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx" />
-        
-        <button onClick={() => setSoundEnabled(!soundEnabled)} className={iconBtnClass}>
-          {soundEnabled ? <Volume2 size={20} /> : <VolumeX size={20} className="text-red-400" />}
-        </button>
-        <button onClick={() => setIsDarkMode(!isDarkMode)} className={iconBtnClass}>
-          {isDarkMode ? <Sun size={20} className="text-amber-400" /> : <Moon size={20} />}
-        </button>
+        <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx,.json" />
       </div>
     </header>
   );
@@ -1150,6 +1333,19 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
             <BookOpen className="text-indigo-500" /> Paragraph Practice Setup
           </h2>
           
+          {isOfflineMode ? (
+            <div className="space-y-4">
+              <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm">
+                Offline mode is active. Upload a saved paragraph file to practice without internet.
+              </div>
+              <button
+                onClick={() => fileInputRef.current.click()}
+                className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all"
+              >
+                Upload Saved Paragraph (.json)
+              </button>
+            </div>
+          ) : (
           <div className="space-y-6">
             {/* Flashcard Upload */}
             <div>
@@ -1160,9 +1356,9 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                   className="w-full py-3 px-4 rounded-xl border-2 border-dashed border-slate-400 hover:border-indigo-500 transition-colors flex items-center justify-center gap-2 text-slate-500 hover:text-indigo-500"
                 >
                   <Upload size={20} />
-                  Upload Flashcard Set (.csv, .txt, .docx)
+                  Upload Flashcard Set / Saved Practice (.csv, .txt, .docx, .json)
                 </button>
-                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx" />
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx,.json" />
                 
                 <div className={`p-3 rounded-xl text-sm ${cards.length > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800/50 text-slate-400'}`}>
                   {cards.length > 0 ? `${cards.length} flashcards loaded` : 'No flashcards loaded - will use default set'}
@@ -1293,6 +1489,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
               Generate Paragraph
             </button>
           </div>
+          )}
         </div>
         {showSettings && <SettingsModal />}
       </div>
@@ -1321,6 +1518,19 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
             <MessageCircle className="text-indigo-500" /> Conversation Practice Setup
           </h2>
 
+          {isOfflineMode ? (
+            <div className="space-y-4">
+              <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm">
+                Offline mode is active. Upload a saved conversation file to practice without internet.
+              </div>
+              <button
+                onClick={() => fileInputRef.current.click()}
+                className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all"
+              >
+                Upload Saved Conversation (.json)
+              </button>
+            </div>
+          ) : (
           <div className="space-y-6">
             <div>
               <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Flashcard Set</label>
@@ -1330,9 +1540,9 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                   className="w-full py-3 px-4 rounded-xl border-2 border-dashed border-slate-400 hover:border-indigo-500 transition-colors flex items-center justify-center gap-2 text-slate-500 hover:text-indigo-500"
                 >
                   <Upload size={20} />
-                  Upload Flashcard Set (.csv, .txt, .docx)
+                  Upload Flashcard Set / Saved Practice (.csv, .txt, .docx, .json)
                 </button>
-                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx" />
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx,.json" />
 
                 <div className={`p-3 rounded-xl text-sm ${cards.length > 0 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-slate-800/50 text-slate-400'}`}>
                   {cards.length > 0 ? `${cards.length} flashcards loaded` : 'No flashcards loaded - will use default set'}
@@ -1453,6 +1663,7 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
               Generate Conversation
             </button>
           </div>
+          )}
         </div>
         {showSettings && <SettingsModal />}
       </div>
@@ -1631,6 +1842,14 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
 
             <div className="flex gap-4 justify-center">
               <button
+                onClick={downloadConversationSnapshot}
+                className="px-8 py-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-500/25 active:scale-95 flex items-center gap-2"
+              >
+                <Download size={18} />
+                Save Offline
+              </button>
+
+              <button
                 onClick={() => setAppMode('conversation-setup')}
                 className="px-8 py-4 rounded-xl bg-slate-600 hover:bg-slate-500 text-white font-bold transition-all shadow-lg shadow-slate-500/20 active:scale-95"
               >
@@ -1719,6 +1938,14 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                       <Star size={20} />
                       {highlightWords ? 'Hide Vocabulary' : 'Highlight Vocabulary'}
                     </button>
+
+                    <button
+                      onClick={downloadParagraphSnapshot}
+                      className="px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 bg-indigo-600 text-white hover:bg-indigo-500"
+                    >
+                      <Download size={20} />
+                      Save Offline
+                    </button>
                   </div>
 
                   {/* Pinyin Display */}
@@ -1773,7 +2000,6 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                               {translationVisible && question.question_english && (
                                 <div className="text-sm text-slate-500 mb-3 italic">{question.question_english}</div>
                               )}
-                              
                               <div className="space-y-2">
                                 {question.options.map((option, oIndex) => {
                                   const optionLetter = String.fromCharCode(65 + oIndex); // A, B, C, D
@@ -1997,6 +2223,36 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
           </div>
 
           <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => setSoundEnabled((prev) => !prev)}
+                className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
+                  soundEnabled
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
+                    : isDarkMode
+                      ? 'bg-slate-950 border-slate-700 text-slate-300 hover:text-white'
+                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-slate-900'
+                }`}
+                title="Toggle sound effects"
+              >
+                {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} className="text-red-400" />}
+                {soundEnabled ? 'Sound On' : 'Sound Off'}
+              </button>
+
+              <button
+                onClick={() => setIsDarkMode((prev) => !prev)}
+                className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
+                  isDarkMode
+                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                    : 'bg-amber-500/10 border-amber-500/30 text-amber-600'
+                }`}
+                title="Toggle app theme"
+              >
+                {isDarkMode ? <Moon size={16} /> : <Sun size={16} className="text-amber-500" />}
+                {isDarkMode ? 'Dark Mode' : 'Light Mode'}
+              </button>
+            </div>
+
             <div>
               <label className="block text-xs font-bold uppercase tracking-widest opacity-60 mb-2">Gemini API Key</label>
               <div className={`flex items-center gap-2 p-3 rounded-xl border ${isDarkMode ? 'bg-slate-950 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
@@ -2014,12 +2270,14 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
               </p>
             </div>
 
+            {!isOfflineMode && (
             <div className="flex items-center justify-between p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
                <span className="text-sm font-bold text-indigo-500">Connection Status</span>
                <button onClick={testConnection} disabled={testStatus === 'loading'} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-2">
                  {testStatus === 'loading' ? <Loader2 className="animate-spin" size={12}/> : <Zap size={12}/>} Test
                </button>
             </div>
+            )}
             
             {testStatus === 'success' && <div className="text-xs text-emerald-500 font-bold text-center">Connection Successful!</div>}
             {testStatus && testStatus.startsWith('error') && <div className="text-xs text-red-500 font-bold text-center break-words">{testStatus}</div>}
@@ -2037,6 +2295,12 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
   return (
     <div className={`min-h-screen flex flex-col items-center p-4 transition-colors duration-300 font-sans ${themeClass} ${isDarkMode ? 'dark' : ''}`}>
       <Header />
+
+      {isOfflineMode && (
+        <div className="w-full max-w-md mb-3 px-4 py-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 text-xs font-bold uppercase tracking-wider text-center">
+          Offline mode is active. Upload saved paragraph or conversation files from their setup screens.
+        </div>
+      )}
 
       <main className="w-full max-w-md flex-1 flex flex-col justify-center">
         {/* Progress Display */}
@@ -2148,14 +2412,17 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
             <Shuffle size={20} />
           </button>
 
-          <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
-            <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
-          </button>
+          {!isOfflineMode && (
+            <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
+              <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
+            </button>
+          )}
           
           <button onClick={nextCard} className={navBtnClass}><ChevronRight /></button>
         </div>
 
         {/* AI Context Section */}
+        {!isOfflineMode && (
         <div className={`rounded-[2rem] p-6 mb-6 transition-all border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
           <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-2 text-indigo-500 text-xs font-black tracking-widest">
@@ -2195,10 +2462,11 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
             <p className="text-sm text-slate-500 italic text-center py-2">Press 'Shift' to generate an example sentence.</p>
           )}
         </div>
+        )}
       </main>
 
       {/* Chat Modal */}
-      {showChat && (
+      {showChat && !isOfflineMode && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-in fade-in">
           <div className={`w-full max-w-lg h-[80vh] rounded-[2.5rem] flex flex-col overflow-hidden shadow-2xl ${isDarkMode ? 'bg-slate-900' : 'bg-white'}`}>
             <div className={`p-6 border-b flex justify-between items-center ${isDarkMode ? 'bg-slate-900/50 border-slate-800' : 'bg-slate-50/50 border-slate-100'}`}>
