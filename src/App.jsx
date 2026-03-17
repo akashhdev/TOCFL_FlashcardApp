@@ -382,6 +382,7 @@ export default function App() {
   const [conversationVisibleTurns, setConversationVisibleTurns] = useState(0);
   const [conversationQuestionAnswers, setConversationQuestionAnswers] = useState({});
   const [conversationVisibleTranslations, setConversationVisibleTranslations] = useState({});
+  const [revealedConversationTurns, setRevealedConversationTurns] = useState({});
   const [playingTurnIndex, setPlayingTurnIndex] = useState(null);
 
   // Post-session review state for flashcards summary screen.
@@ -791,6 +792,7 @@ export default function App() {
       setConversationVisibleTurns(0);
       setConversationQuestionAnswers({});
       setConversationVisibleTranslations({});
+      setRevealedConversationTurns({});
       setPlayingTurnIndex(null);
       speakerVoicePreferenceRef.current = {};
       setAppMode('conversation-practice');
@@ -1181,6 +1183,7 @@ ${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions"
     setConversationVisibleTurns(0);
     setConversationQuestionAnswers({});
     setConversationVisibleTranslations({});
+    setRevealedConversationTurns({});
 
     let vocabContext = '';
     if (conversationConfig.useCurrentDeck) {
@@ -1726,7 +1729,19 @@ JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","
                             {isPlaying ? <Loader2 size={14} className="animate-spin" /> : <Volume2 size={14} />}
                           </button>
                         </div>
-                        <p className="text-base leading-relaxed">{turn.text}</p>
+                        <div className="mt-1">
+                          <button
+                            onClick={() => setRevealedConversationTurns(prev => ({ ...prev, [index]: !prev[index] }))}
+                            className={`text-xs px-2 py-0.5 rounded-lg border transition-colors ${isLeft
+                              ? isDarkMode ? 'bg-slate-700 border-slate-600 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-500 hover:text-indigo-600'
+                              : 'bg-white/15 border-white/30 text-white/80 hover:bg-white/25'}`}
+                          >
+                            {revealedConversationTurns[index] ? 'Hide' : 'Show text'}
+                          </button>
+                          {revealedConversationTurns[index] && (
+                            <p className="text-base leading-relaxed mt-2">{turn.text}</p>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
