@@ -37,7 +37,7 @@ import {
 
 // --- Configuration ---
 const envApiKey = import.meta.env.VITE_GEMINI_API_KEY?.trim() || "";
-const TOKEN_EFFICIENCY_INSTRUCTION = "Be concise and token-efficient. Avoid repetition, filler, and verbose prefaces. Return only what is requested in the required format.";
+const TOKEN_EFFICIENCY_INSTRUCTION = "Be concise. No filler. Output only requested format.";
 
 // --- Initial Data ---
 const INITIAL_DECK = [
@@ -535,6 +535,12 @@ export default function App() {
     setTimerKey(prev => prev + 1);
   };
 
+  // Keeps tutor chat scoped to the currently visible flashcard.
+  const resetTutorChat = () => {
+    setChatMessages([]);
+    setChatInput("");
+  };
+
   // Marks untouched cards as missed when learner navigates away without grading.
   const updateStatusIfMissed = (index) => {
     if (cardStatuses[index] === 'unvisited') {
@@ -548,6 +554,7 @@ export default function App() {
     if (currentIndex < cards.length - 1) {
       updateStatusIfMissed(currentIndex);
       setIsFlipped(false);
+      resetTutorChat();
       setCurrentIndex(p => p + 1);
       setAiSentence(null);
       setIsContextRevealed(false);
@@ -565,6 +572,7 @@ export default function App() {
     if (currentIndex > 0) {
       updateStatusIfMissed(currentIndex);
       setIsFlipped(false);
+      resetTutorChat();
       setCurrentIndex(p => p - 1);
       setAiSentence(null);
       setIsContextRevealed(false);
@@ -574,6 +582,8 @@ export default function App() {
 
   // Central grading handler for flashcards; updates score, SFX, status, and flow.
   const markCard = (status) => {
+    const cardTextForAudio = currentCard?.char;
+
     let points = 0;
     if (status === 'correct') {
       points = isBonusWindow ? 10 : 5;
@@ -590,6 +600,13 @@ export default function App() {
       return n;
     });
 
+    if (!isOfflineMode && cardTextForAudio) {
+      // Small delay keeps grading SFX from clipping the spoken card audio.
+      setTimeout(() => {
+        handleTTS(cardTextForAudio);
+      }, 120);
+    }
+
     if (currentIndex === cards.length - 1) {
       if (soundEnabled && status === 'correct') SoundFX.victory();
       setSessionDuration((Date.now() - startTime) / 1000);
@@ -598,6 +615,7 @@ export default function App() {
       setIsFlipped(false);
       setAiSentence(null);
       setIsContextRevealed(false);
+      resetTutorChat();
       resetTimer();
       setTimeout(() => setCurrentIndex(p => p + 1), 200);
     }
@@ -613,6 +631,7 @@ export default function App() {
     setIsFlipped(false);
     setCardStatuses(new Array(deckToUse.length).fill('unvisited'));
     setScore(0);
+    resetTutorChat();
     setAiSentence(null);
     setIsContextRevealed(false);
     setRevealedReviewItems({});
@@ -943,15 +962,15 @@ export default function App() {
     // Construct vocabulary context if option is selected
     let vocabContext = "";
     if (paragraphConfig.useCurrentDeck) {
-      const deckWords = cards.map(c => c.char).join(", ");
+      const deckWords = [...new Set(cards.map(c => c.char).filter(Boolean))].join(",");
       const familiarityLevels = {
-        1: "Use the flashcard words naturally and balanced throughout the paragraph",
-        2: "Incorporate flashcard words with slight repetition for familiarity",
-        3: "Use flashcard words moderately with some repetition",
-        4: "Prioritize flashcard words with high repetition for familiarity",
-        5: "Maximize repetition of flashcard words to create very familiar vocabulary"
+        1: "natural usage",
+        2: "slight repetition",
+        3: "moderate repetition",
+        4: "high repetition",
+        5: "max repetition"
       };
-      vocabContext = `Vocabulary Constraint: Use these words from the flashcard set: [${deckWords}]. ${familiarityLevels[paragraphConfig.familiarity]}.`;
+      vocabContext = `vocab:[${deckWords}] familiarity:${paragraphConfig.familiarity} (${familiarityLevels[paragraphConfig.familiarity]})`;
     }
 
     const lengthMap = {
@@ -960,18 +979,19 @@ export default function App() {
       'long': '120-160 words'
     };
 
-    const prompt = `Generate a TOCFL Band ${paragraphConfig.level} reading paragraph in traditional Chinese.
-${vocabContext}
-Topic: daily-life narrative, coherent and natural.
-Length: ${lengthMap[paragraphConfig.length]}.
-${paragraphConfig.includeQuestions ? 'Also include 3-5 comprehension MCQs (main idea, detail, vocabulary) with Chinese + English for question/options, plus correct answer and short English explanation.' : ''}
-Return ${paragraphConfig.includeQuestions ? 'JSON object only' : 'only the Chinese paragraph text'}.
-${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions":[{"question":"...","question_english":"...","options":["A)...","B)...","C)..."],"options_english":["A)...","B)...","C)..."],"correct_answer":"A","explanation":"..."}]}' : ''}`;
+    const prompt = `task: TOCFL Band ${paragraphConfig.level} reading paragraph in Traditional Chinese
+  topic: daily-life narrative
+  length: ${lengthMap[paragraphConfig.length]}
+  ${vocabContext ? `${vocabContext}\n` : ''}output: ${paragraphConfig.includeQuestions
+      ? 'json {paragraph, questions[3-5]{question, question_english, options[3], options_english[3], correct_answer, explanation}}'
+      : 'text paragraph only'}`;
     
     try {
       const response = await callGemini(
         prompt, 
-        paragraphConfig.includeQuestions ? "Return valid JSON only." : "Return only the paragraph text in traditional Chinese.", 
+        paragraphConfig.includeQuestions
+          ? "Generate natural TOCFL content in zh-Hant. Return strict JSON only."
+          : "Generate natural TOCFL content in zh-Hant. Return only the paragraph text.", 
         effectiveKey, 
         paragraphConfig.includeQuestions ? "application/json" : "text/plain"
       );
@@ -996,13 +1016,7 @@ ${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions"
 
       // Generate pinyin and English translation
       setParagraphLoadingStatus("Generating translations...");
-      const translationPrompt = `Convert this Chinese paragraph into:
-    1) Pinyin with tone marks
-    2) Natural English translation
-
-    Paragraph: ${paragraphData.chinese}
-
-    Return JSON only: {"pinyin":"...","english":"..."}`;
+      const translationPrompt = `Convert zh-Hant paragraph to JSON only: {"pinyin":"...","english":"..."}\nparagraph:${paragraphData.chinese}`;
       
       const translationData = await callGemini(translationPrompt, "Return valid JSON only.", effectiveKey, "application/json");
       const cleanedTranslation = translationData.replace(/```json|```/g, '').trim();
@@ -1187,15 +1201,15 @@ ${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions"
 
     let vocabContext = '';
     if (conversationConfig.useCurrentDeck) {
-      const deckWords = cards.map(c => c.char).join(', ');
+      const deckWords = [...new Set(cards.map(c => c.char).filter(Boolean))].join(',');
       const familiarityLevels = {
-        1: 'Use deck words naturally and balanced.',
-        2: 'Use deck words with slight repetition.',
-        3: 'Use deck words moderately with some repetition.',
-        4: 'Prioritize deck words with high repetition.',
-        5: 'Maximize deck-word repetition while still natural.'
+        1: 'natural usage',
+        2: 'slight repetition',
+        3: 'moderate repetition',
+        4: 'high repetition',
+        5: 'max repetition'
       };
-      vocabContext = `Vocabulary constraint: [${deckWords}]. ${familiarityLevels[conversationConfig.familiarity]}`;
+      vocabContext = `vocab:[${deckWords}] familiarity:${conversationConfig.familiarity} (${familiarityLevels[conversationConfig.familiarity]})`;
     }
 
     const turnMap = {
@@ -1204,17 +1218,15 @@ ${paragraphConfig.includeQuestions ? 'JSON shape: {"paragraph":"...","questions"
       long: '13-16 turns'
     };
 
-    const prompt = `Generate a TOCFL Band ${conversationConfig.level} listening conversation in traditional Chinese.
-${vocabContext}
-Conversation length: ${turnMap[conversationConfig.length]}.
-Use 2-3 speakers with clear names.
-Return JSON only.
-JSON shape: {"title":"...","speakers":["..."],"conversation":[{"speaker":"...","text":"..."}]${conversationConfig.includeQuestions ? ',"questions":[{"question":"...","question_english":"...","options":["A)...","B)...","C)..."],"options_english":["A)...","B)...","C)..."],"correct_answer":"A","explanation":"..."}]' : ''}}`;
+    const prompt = `task: TOCFL Band ${conversationConfig.level} listening conversation in Traditional Chinese
+  turns: ${turnMap[conversationConfig.length]}
+  speakers: 2-3 with clear names
+  ${vocabContext ? `${vocabContext}\n` : ''}output: json {title, speakers[], conversation[{speaker,text}]${conversationConfig.includeQuestions ? ', questions[{question,question_english,options[3],options_english[3],correct_answer,explanation}]' : ''}}`;
 
     try {
       const response = await callGemini(
         prompt,
-        'You are a TOCFL listening-test writer. Output concise, valid JSON only.',
+        'You are a TOCFL listening-test writer. Return strict JSON only in the requested shape.',
         effectiveKey,
         'application/json'
       );
