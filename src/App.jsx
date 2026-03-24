@@ -1218,24 +1218,49 @@ export default function App() {
       long: '13-16 turns'
     };
 
-    const prompt = `task: TOCFL Band ${conversationConfig.level} listening conversation in Traditional Chinese
+    const minQuestionCount = conversationConfig.includeQuestions
+      ? (conversationConfig.length === 'short' ? 3 : 5)
+      : 0;
+
+    const buildConversationPrompt = (strictQuestionCount = false) => `task: TOCFL Band ${conversationConfig.level} listening conversation in Traditional Chinese
   turns: ${turnMap[conversationConfig.length]}
   speakers: 2-3 with clear names
+  ${conversationConfig.includeQuestions ? `questions: generate at least ${minQuestionCount} multiple-choice listening questions${strictQuestionCount ? `; fewer than ${minQuestionCount} questions is invalid` : ''}` : ''}
   ${vocabContext ? `${vocabContext}\n` : ''}output: json {title, speakers[], conversation[{speaker,text}]${conversationConfig.includeQuestions ? ', questions[{question,question_english,options[3],options_english[3],correct_answer,explanation}]' : ''}}`;
 
     try {
-      const response = await callGemini(
-        prompt,
-        'You are a TOCFL listening-test writer. Return strict JSON only in the requested shape.',
-        effectiveKey,
-        'application/json'
-      );
+      let parsed = null;
 
-      const cleaned = response.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(cleaned);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt > 0) {
+          setConversationLoadingStatus(`Regenerating questions to reach ${minQuestionCount}...`);
+        }
 
-      if (!Array.isArray(parsed.conversation) || parsed.conversation.length === 0) {
-        throw new Error('No conversation turns generated');
+        const response = await callGemini(
+          buildConversationPrompt(attempt > 0),
+          conversationConfig.includeQuestions
+            ? `You are a TOCFL listening-test writer. Return strict JSON only in the requested shape. If questions are requested, you must include at least ${minQuestionCount} questions.`
+            : 'You are a TOCFL listening-test writer. Return strict JSON only in the requested shape.',
+          effectiveKey,
+          'application/json'
+        );
+
+        const cleaned = response.replace(/```json|```/g, '').trim();
+        const candidate = JSON.parse(cleaned);
+
+        if (!Array.isArray(candidate.conversation) || candidate.conversation.length === 0) {
+          throw new Error('No conversation turns generated');
+        }
+
+        const generatedQuestions = Array.isArray(candidate.questions) ? candidate.questions : [];
+        if (!conversationConfig.includeQuestions || generatedQuestions.length >= minQuestionCount) {
+          parsed = candidate;
+          break;
+        }
+      }
+
+      if (!parsed) {
+        throw new Error(`Generated fewer than ${minQuestionCount} questions`);
       }
 
       setConversationData({
@@ -1793,7 +1818,11 @@ export default function App() {
                     {conversationData.questions.map((question, qIndex) => {
                       const userAnswer = conversationQuestionAnswers[qIndex];
                       const hasAnswered = userAnswer !== undefined;
-                      const isCorrect = hasAnswered && userAnswer === question.correct_answer;
+                        const correctIdx = (question.options || []).findIndex(opt => opt === question.correct_answer);
+                        const normalizedCorrect = correctIdx >= 0
+                          ? String.fromCharCode(65 + correctIdx)
+                          : (question.correct_answer || '').trim().toUpperCase().charAt(0);
+                        const isCorrect = hasAnswered && userAnswer === normalizedCorrect;
                       const translationVisible = !!conversationVisibleTranslations[qIndex];
 
                       return (
@@ -1816,7 +1845,7 @@ export default function App() {
                             {question.options.map((option, oIndex) => {
                               const optionLetter = String.fromCharCode(65 + oIndex);
                               const isSelected = userAnswer === optionLetter;
-                              const isCorrectOption = optionLetter === question.correct_answer;
+                              const isCorrectOption = optionLetter === normalizedCorrect;
                               const showCorrectness = hasAnswered;
 
                               let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
@@ -1855,7 +1884,7 @@ export default function App() {
                               <div className="font-bold text-indigo-600 text-sm mb-1">Explanation:</div>
                               <div className="text-sm text-slate-600">{question.explanation}</div>
                               <div className={`mt-2 text-sm font-bold ${isCorrect ? 'text-emerald-600' : 'text-red-600'}`}>
-                                {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${question.correct_answer}.`}
+                                {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${normalizedCorrect}.`}
                               </div>
                             </div>
                           )}
@@ -2009,7 +2038,11 @@ export default function App() {
                         {paragraphData.questions.map((question, qIndex) => {
                           const userAnswer = questionAnswers[qIndex];
                           const hasAnswered = userAnswer !== undefined;
-                          const isCorrect = hasAnswered && userAnswer === question.correct_answer;
+                            const correctIdx = (question.options || []).findIndex(opt => opt === question.correct_answer);
+                            const normalizedCorrect = correctIdx >= 0
+                              ? String.fromCharCode(65 + correctIdx)
+                              : (question.correct_answer || '').trim().toUpperCase().charAt(0);
+                            const isCorrect = hasAnswered && userAnswer === normalizedCorrect;
                           const translationVisible = !!visibleTranslations[qIndex];
                           
                           return (
@@ -2031,7 +2064,7 @@ export default function App() {
                                 {question.options.map((option, oIndex) => {
                                   const optionLetter = String.fromCharCode(65 + oIndex); // A, B, C, D
                                   const isSelected = userAnswer === optionLetter;
-                                  const isCorrectOption = optionLetter === question.correct_answer;
+                                  const isCorrectOption = optionLetter === normalizedCorrect;
                                   const showCorrectness = hasAnswered;
                                   
                                   let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
@@ -2074,7 +2107,7 @@ export default function App() {
                                   <div className="font-bold text-indigo-600 text-sm mb-1">Explanation:</div>
                                   <div className="text-sm text-slate-600">{question.explanation}</div>
                                   <div className={`mt-2 text-sm font-bold ${isCorrect ? 'text-emerald-600' : 'text-red-600'}`}>
-                                    {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${question.correct_answer}.`}
+                                    {isCorrect ? '✓ Correct!' : `✗ Incorrect. The correct answer is ${normalizedCorrect}.`}
                                   </div>
                                 </div>
                               )}
