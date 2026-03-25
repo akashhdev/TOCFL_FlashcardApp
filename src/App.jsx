@@ -4,7 +4,8 @@ import {
   Loader2, X, Moon, Sun, Upload, Download, Volume2, VolumeX, 
   Trophy, AlertCircle, Eye, EyeOff, RefreshCw, BrainCircuit,
   GraduationCap, Star, Smile, Frown, Meh, AlertTriangle, XCircle,
-  BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap
+  BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap,
+  LogIn, LogOut, Library, Save, PlayCircle
 } from 'lucide-react';
 
 /*
@@ -37,6 +38,24 @@ import {
 
 // --- Configuration ---
 const envApiKey = import.meta.env.VITE_GEMINI_API_KEY?.trim() || "";
+
+// --- API Helper ---
+// Shared fetch wrapper for the Express backend. Reads JWT from localStorage on each call.
+const callAPI = async (path, method = 'GET', body = null) => {
+  const token = localStorage.getItem('tocfl_auth_token');
+  const opts = {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+};
 const TOKEN_EFFICIENCY_INSTRUCTION = "Be concise. No filler. Output only requested format.";
 
 // --- Initial Data ---
@@ -351,7 +370,32 @@ export default function App() {
   const [customKey, setCustomKey] = useState(() => localStorage.getItem('gemini_key') || "");
   const [showSettings, setShowSettings] = useState(false);
   const [isOfflineMode, setIsOfflineMode] = useState(() => localStorage.getItem('tocfl_mode') === 'offline');
-  
+
+  // Auth State
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('tocfl_auth_token') || null);
+  const [authUser, setAuthUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Library Panel State
+  const [showLibrary, setShowLibrary] = useState(false);
+  const [libraryTab, setLibraryTab] = useState('decks'); // 'decks' | 'paragraphs' | 'conversations'
+  const [savedDecks, setSavedDecks] = useState([]);
+  const [savedParagraphs, setSavedParagraphs] = useState([]);
+  const [savedConversations, setSavedConversations] = useState([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+
+  // Save prompt state
+  const [showSavePrompt, setShowSavePrompt] = useState(null); // null | 'deck' | 'paragraph' | 'conversation'
+  const [saveName, setSaveName] = useState('');
+
+  // Current saved deck id (links active session to DB for progress saving)
+  const [currentDeckId, setCurrentDeckId] = useState(null);
+  const [pendingResume, setPendingResume] = useState(null); // { deckId, progress } | null
+
   const effectiveKey = customKey || envApiKey;
 
   // Paragraph Practice State (reading comprehension workflow)
@@ -479,6 +523,160 @@ export default function App() {
       }
       return next;
     });
+  };
+
+  // --- Auth Handlers ---
+  const handleLogin = async () => {
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const data = await callAPI('/api/auth/login', 'POST', { username: authUsername, password: authPassword });
+      localStorage.setItem('tocfl_auth_token', data.token);
+      setAuthToken(data.token);
+      setAuthUser({ username: data.username });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+    setAuthLoading(false);
+  };
+
+  const handleRegister = async () => {
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const data = await callAPI('/api/auth/register', 'POST', { username: authUsername, password: authPassword });
+      localStorage.setItem('tocfl_auth_token', data.token);
+      setAuthToken(data.token);
+      setAuthUser({ username: data.username });
+    } catch (e) {
+      setAuthError(e.message);
+    }
+    setAuthLoading(false);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('tocfl_auth_token');
+    setAuthToken(null);
+    setAuthUser(null);
+    setCurrentDeckId(null);
+    setPendingResume(null);
+  };
+
+  // Validate stored token on mount and restore username from JWT payload.
+  useEffect(() => {
+    if (!authToken) return;
+    callAPI('/api/decks')
+      .then(() => {
+        try {
+          const payload = JSON.parse(atob(authToken.split('.')[1]));
+          setAuthUser({ username: payload.username });
+        } catch { /* malformed token */ }
+      })
+      .catch(() => {
+        localStorage.removeItem('tocfl_auth_token');
+        setAuthToken(null);
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- Library ---
+  const loadLibrary = async () => {
+    setLibraryLoading(true);
+    try {
+      const [decks, paragraphs, conversations] = await Promise.all([
+        callAPI('/api/decks'),
+        callAPI('/api/paragraphs'),
+        callAPI('/api/conversations'),
+      ]);
+      setSavedDecks(decks);
+      setSavedParagraphs(paragraphs);
+      setSavedConversations(conversations);
+    } catch (e) {
+      console.error('Library load failed:', e);
+    }
+    setLibraryLoading(false);
+  };
+
+  const loadDeckFromLibrary = async (deck) => {
+    const deckCards = JSON.parse(deck.cards_json || '[]');
+    if (!deckCards.length) return;
+    setCards(deckCards);
+    resetSession(deckCards);
+    setCurrentDeckId(deck.id);
+    setShowLibrary(false);
+    setAppMode('flashcards');
+
+    if (deck.has_progress) {
+      try {
+        const progress = await callAPI(`/api/progress/${deck.id}`);
+        if (progress && !progress.is_finished) {
+          setPendingResume({ deckId: deck.id, progress });
+        }
+      } catch { /* no progress */ }
+    }
+  };
+
+  const applyResume = (progress) => {
+    setCurrentIndex(progress.current_index);
+    setCardStatuses(JSON.parse(progress.card_statuses));
+    setScore(progress.score);
+    setSessionDuration(progress.session_duration);
+    setIsFinished(progress.is_finished === 1);
+    setIsBonusWindow(progress.is_bonus_window === 1);
+    setPendingResume(null);
+  };
+
+  // --- Cloud Save Functions ---
+  const saveDeckToCloud = async () => {
+    if (!saveName.trim()) return;
+    try {
+      await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards });
+      setShowSavePrompt(null);
+      setSaveName('');
+      if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
+    } catch (e) {
+      console.error('Save deck failed:', e);
+    }
+  };
+
+  const saveParagraphToCloud = async () => {
+    if (!saveName.trim()) return;
+    try {
+      await callAPI('/api/paragraphs', 'POST', { name: saveName.trim(), paragraphConfig, paragraphData });
+      setShowSavePrompt(null);
+      setSaveName('');
+      if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
+    } catch (e) {
+      console.error('Save paragraph failed:', e);
+    }
+  };
+
+  const saveConversationToCloud = async () => {
+    if (!saveName.trim()) return;
+    try {
+      await callAPI('/api/conversations', 'POST', { name: saveName.trim(), conversationConfig, conversationData });
+      setShowSavePrompt(null);
+      setSaveName('');
+      if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
+    } catch (e) {
+      console.error('Save conversation failed:', e);
+    }
+  };
+
+  const pauseAndSaveProgress = async () => {
+    if (!currentDeckId) return;
+    try {
+      await callAPI(`/api/progress/${currentDeckId}`, 'PUT', {
+        currentIndex,
+        cardStatuses,
+        score,
+        sessionDuration: Date.now() - startTime,
+        isFinished,
+        isBonusWindow,
+      });
+      if (soundEnabled) SoundFX.playTone(600, 'sine', 0.15);
+    } catch (e) {
+      console.error('Save progress failed:', e);
+    }
   };
 
   // --- Keyboard Shortcuts ---
@@ -728,6 +926,74 @@ export default function App() {
     if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.1);
   };
 
+  // --- Snapshot Loaders (component-scope so Library modal can call them too) ---
+  const applyParagraphSnapshot = (payload) => {
+    const snapshotConfig = payload?.paragraphConfig || {};
+    const snapshotData = payload?.paragraphData || {};
+    if (!snapshotData?.chinese || typeof snapshotData.chinese !== 'string') return false;
+
+    setParagraphConfig(prev => ({
+      ...prev,
+      ...snapshotConfig,
+      familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
+    }));
+
+    setParagraphData({
+      chinese: snapshotData.chinese,
+      pinyin: snapshotData.pinyin || '',
+      english: snapshotData.english || '',
+      questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
+      words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
+    });
+
+    setShowPinyin(false);
+    setShowEnglish(false);
+    setHighlightWords(false);
+    setQuestionAnswers({});
+    setVisibleTranslations({});
+    setAppMode('paragraph-practice');
+    return true;
+  };
+
+  const applyConversationSnapshot = (payload) => {
+    const snapshotConfig = payload?.conversationConfig || {};
+    const snapshotData = payload?.conversationData || {};
+    if (!Array.isArray(snapshotData.conversation) || snapshotData.conversation.length === 0) return false;
+
+    const normalizedConversation = snapshotData.conversation
+      .map((turn) => {
+        const speaker = String(turn?.speaker || '').trim();
+        const text = String(turn?.text || '').trim();
+        if (!speaker || !text) return null;
+        return { speaker, text };
+      })
+      .filter(Boolean);
+
+    if (!normalizedConversation.length) return false;
+
+    setConversationConfig(prev => ({
+      ...prev,
+      ...snapshotConfig,
+      familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
+    }));
+
+    setConversationData({
+      title: String(snapshotData.title || 'Listening Conversation'),
+      conversation: normalizedConversation,
+      questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
+      words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
+    });
+
+    setConversationVisibleTurns(0);
+    setConversationQuestionAnswers({});
+    setConversationVisibleTranslations({});
+    setRevealedConversationTurns({});
+    setPlayingTurnIndex(null);
+    speakerVoicePreferenceRef.current = {};
+    setAppMode('conversation-practice');
+    return true;
+  };
+
   // --- File Handling ---
   // Accepts CSV/TXT/DOCX and normalizes to internal deck shape.
   const handleFileUpload = async (e) => {
@@ -749,73 +1015,6 @@ export default function App() {
           meaning: finalParts.slice(2).join(', ') || ''
         };
       }).filter(Boolean);
-    };
-
-    const applyParagraphSnapshot = (payload) => {
-      const snapshotConfig = payload?.paragraphConfig || {};
-      const snapshotData = payload?.paragraphData || {};
-      if (!snapshotData?.chinese || typeof snapshotData.chinese !== 'string') return false;
-
-      setParagraphConfig(prev => ({
-        ...prev,
-        ...snapshotConfig,
-        familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
-      }));
-
-      setParagraphData({
-        chinese: snapshotData.chinese,
-        pinyin: snapshotData.pinyin || '',
-        english: snapshotData.english || '',
-        questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
-        words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
-      });
-
-      setShowPinyin(false);
-      setShowEnglish(false);
-      setHighlightWords(false);
-      setQuestionAnswers({});
-      setVisibleTranslations({});
-      setAppMode('paragraph-practice');
-      return true;
-    };
-
-    const applyConversationSnapshot = (payload) => {
-      const snapshotConfig = payload?.conversationConfig || {};
-      const snapshotData = payload?.conversationData || {};
-      if (!Array.isArray(snapshotData.conversation) || snapshotData.conversation.length === 0) return false;
-
-      const normalizedConversation = snapshotData.conversation
-        .map((turn) => {
-          const speaker = String(turn?.speaker || '').trim();
-          const text = String(turn?.text || '').trim();
-          if (!speaker || !text) return null;
-          return { speaker, text };
-        })
-        .filter(Boolean);
-
-      if (!normalizedConversation.length) return false;
-
-      setConversationConfig(prev => ({
-        ...prev,
-        ...snapshotConfig,
-        familiarity: Number.isFinite(snapshotConfig.familiarity) ? snapshotConfig.familiarity : prev.familiarity
-      }));
-
-      setConversationData({
-        title: String(snapshotData.title || 'Listening Conversation'),
-        conversation: normalizedConversation,
-        questions: Array.isArray(snapshotData.questions) ? snapshotData.questions : [],
-        words: Array.isArray(snapshotData.words) ? snapshotData.words : cards.map(c => c.char)
-      });
-
-      setConversationVisibleTurns(0);
-      setConversationQuestionAnswers({});
-      setConversationVisibleTranslations({});
-      setRevealedConversationTurns({});
-      setPlayingTurnIndex(null);
-      speakerVoicePreferenceRef.current = {};
-      setAppMode('conversation-practice');
-      return true;
     };
 
     const applyDeckFromJson = (payload) => {
@@ -1351,6 +1550,11 @@ export default function App() {
         >
           {isOfflineMode ? 'OFFLINE' : 'ONLINE'}
         </button>
+        {authToken && (
+          <button onClick={() => { loadLibrary(); setShowLibrary(true); }} className={iconBtnClass} title="My Library">
+            <Library size={20} />
+          </button>
+        )}
         <button onClick={() => setShowSettings(true)} className={`${iconBtnClass} ${!effectiveKey ? 'animate-pulse text-indigo-500 ring-2 ring-indigo-500' : ''}`}>
           <Settings size={20} />
         </button>
@@ -1358,8 +1562,236 @@ export default function App() {
           <Upload size={20} />
         </button>
         <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx,.json" />
+        {authToken && (
+          <button onClick={handleLogout} className={iconBtnClass} title={`Logout (${authUser?.username})`}>
+            <LogOut size={20} />
+          </button>
+        )}
       </div>
     </header>
+  );
+
+  // --- Auth Gate ---
+  // Shown instead of the whole app when no valid JWT is present.
+  if (!authToken) {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-6 ${themeClass}`}>
+        <div className="flex items-center gap-3 mb-10">
+          <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <GraduationCap className="text-white" size={28} />
+          </div>
+          <span className="font-black text-3xl tracking-tight">TOCFL Prep</span>
+        </div>
+
+        <div className={`w-full max-w-sm p-8 rounded-3xl shadow-2xl border ${cardBg}`}>
+          <div className={`flex p-1 rounded-xl mb-6 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+            {['login', 'register'].map(mode => (
+              <button
+                key={mode}
+                onClick={() => { setAuthMode(mode); setAuthError(''); }}
+                className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all capitalize ${authMode === mode ? 'bg-indigo-600 text-white shadow' : 'text-slate-400'}`}
+              >
+                {mode === 'login' ? 'Sign In' : 'Create Account'}
+              </button>
+            ))}
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-1 block">Username</label>
+              <input
+                value={authUsername}
+                onChange={e => setAuthUsername(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
+                placeholder="your_username"
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-1 block">Password</label>
+              <input
+                type="password"
+                value={authPassword}
+                onChange={e => setAuthPassword(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
+                placeholder="••••••••"
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
+              />
+            </div>
+
+            {authError && (
+              <div className="text-red-500 text-sm font-bold text-center py-2 px-3 bg-red-500/10 rounded-xl">
+                {authError}
+              </div>
+            )}
+
+            <button
+              onClick={authMode === 'login' ? handleLogin : handleRegister}
+              disabled={authLoading || !authUsername.trim() || !authPassword.trim()}
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-black transition-all flex items-center justify-center gap-2"
+            >
+              {authLoading ? <Loader2 className="animate-spin" size={18} /> : <LogIn size={18} />}
+              {authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </div>
+
+          <button
+            onClick={() => setIsDarkMode(p => !p)}
+            className={`mt-6 w-full py-2 rounded-xl text-xs font-bold ${isDarkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}
+          >
+            {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Shared Modal Components ---
+  // SavePromptModal: small name-entry dialog used by all three save flows.
+  const SavePromptModal = ({ onSave }) => (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+      <div className={`w-full max-w-sm p-6 rounded-3xl shadow-2xl border ${cardBg}`}>
+        <h3 className="font-black text-lg mb-4">Save to Cloud</h3>
+        <input
+          autoFocus
+          value={saveName}
+          onChange={e => setSaveName(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && onSave()}
+          placeholder="Enter a name..."
+          className={`w-full px-4 py-3 rounded-xl border text-sm outline-none mb-4 focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200'}`}
+        />
+        <div className="flex gap-3">
+          <button onClick={() => { setShowSavePrompt(null); setSaveName(''); }} className={`flex-1 py-3 rounded-xl font-bold ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>Cancel</button>
+          <button onClick={onSave} disabled={!saveName.trim()} className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // LibraryModal: browse and load saved decks, paragraphs, conversations.
+  const LibraryModal = () => (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+      <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
+        <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <h3 className="font-black text-lg flex items-center gap-2"><Library className="text-indigo-500" size={20}/> My Library</h3>
+          <button onClick={() => setShowLibrary(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
+        </div>
+
+        <div className={`flex border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
+          {['decks', 'paragraphs', 'conversations'].map(tab => (
+            <button
+              key={tab}
+              onClick={() => setLibraryTab(tab)}
+              className={`flex-1 py-3 text-sm font-bold capitalize transition-colors ${libraryTab === tab ? 'text-indigo-500 border-b-2 border-indigo-500' : 'text-slate-400'}`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {libraryLoading && <div className="text-center py-8 text-slate-500">Loading...</div>}
+
+          {libraryTab === 'decks' && !libraryLoading && (
+            savedDecks.length === 0
+              ? <p className="text-center py-8 text-slate-500 text-sm">No saved decks yet.</p>
+              : savedDecks.map(deck => (
+                <div key={deck.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                  <div>
+                    <div className="font-bold">{deck.name}</div>
+                    <div className="text-xs text-slate-500">{deck.card_count} cards</div>
+                    {deck.has_progress === 1 && (
+                      <div className="text-xs text-indigo-500 font-bold flex items-center gap-1 mt-0.5">
+                        <PlayCircle size={12} /> In-progress session saved
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={() => loadDeckFromLibrary(deck)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition-all">
+                      {deck.has_progress === 1 ? 'Resume' : 'Load'}
+                    </button>
+                    <button onClick={async () => { await callAPI(`/api/decks/${deck.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all">
+                      <X size={16}/>
+                    </button>
+                  </div>
+                </div>
+              ))
+          )}
+
+          {libraryTab === 'paragraphs' && !libraryLoading && (
+            savedParagraphs.length === 0
+              ? <p className="text-center py-8 text-slate-500 text-sm">No saved paragraphs yet.</p>
+              : savedParagraphs.map(p => (
+                <div key={p.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                  <div>
+                    <div className="font-bold">{p.name}</div>
+                    <div className="text-xs text-slate-500">{new Date(p.created_at).toLocaleDateString()}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        const full = await callAPI(`/api/paragraphs/${p.id}`);
+                        applyParagraphSnapshot({ paragraphConfig: JSON.parse(full.paragraph_config), paragraphData: JSON.parse(full.paragraph_data) });
+                        setShowLibrary(false);
+                      }}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
+                    >Load</button>
+                    <button onClick={async () => { await callAPI(`/api/paragraphs/${p.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
+                      <X size={16}/>
+                    </button>
+                  </div>
+                </div>
+              ))
+          )}
+
+          {libraryTab === 'conversations' && !libraryLoading && (
+            savedConversations.length === 0
+              ? <p className="text-center py-8 text-slate-500 text-sm">No saved conversations yet.</p>
+              : savedConversations.map(c => (
+                <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                  <div>
+                    <div className="font-bold">{c.name}</div>
+                    <div className="text-xs text-slate-500">{new Date(c.created_at).toLocaleDateString()}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        const full = await callAPI(`/api/conversations/${c.id}`);
+                        applyConversationSnapshot({ conversationConfig: JSON.parse(full.conversation_config), conversationData: JSON.parse(full.conversation_data) });
+                        setShowLibrary(false);
+                      }}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
+                    >Load</button>
+                    <button onClick={async () => { await callAPI(`/api/conversations/${c.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
+                      <X size={16}/>
+                    </button>
+                  </div>
+                </div>
+              ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // PendingResumePrompt: shown after loading a deck that has a saved in-progress session.
+  const PendingResumePrompt = () => (
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/40">
+      <div className={`w-full max-w-sm p-6 rounded-3xl shadow-2xl border ${cardBg}`}>
+        <h3 className="font-black text-lg mb-2">Saved Progress Found</h3>
+        <p className="text-slate-500 text-sm mb-6">
+          You were on card {(pendingResume?.progress?.current_index ?? 0) + 1} with {pendingResume?.progress?.score ?? 0} pts. Resume where you left off?
+        </p>
+        <div className="flex gap-3">
+          <button onClick={() => setPendingResume(null)} className={`flex-1 py-3 rounded-xl font-bold ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+            Start Fresh
+          </button>
+          <button onClick={() => applyResume(pendingResume.progress)} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold">
+            Resume
+          </button>
+        </div>
+      </div>
+    </div>
   );
 
   // --- Views ---
@@ -1532,6 +1964,7 @@ export default function App() {
           )}
         </div>
         {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
       </div>
     );
   }
@@ -1706,6 +2139,7 @@ export default function App() {
           )}
         </div>
         {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
       </div>
     );
   }
@@ -1896,7 +2330,7 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex gap-4 justify-center">
+            <div className="flex gap-4 justify-center flex-wrap">
               <button
                 onClick={downloadConversationSnapshot}
                 className="px-8 py-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold transition-all shadow-lg shadow-blue-500/25 active:scale-95 flex items-center gap-2"
@@ -1904,6 +2338,15 @@ export default function App() {
                 <Download size={18} />
                 Save Offline
               </button>
+              {authToken && (
+                <button
+                  onClick={() => { setShowSavePrompt('conversation'); setSaveName(''); }}
+                  className="px-8 py-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all shadow-lg shadow-emerald-500/25 active:scale-95 flex items-center gap-2"
+                >
+                  <Save size={18} />
+                  Save to Cloud
+                </button>
+              )}
 
               <button
                 onClick={() => setAppMode('conversation-setup')}
@@ -1922,6 +2365,8 @@ export default function App() {
           </div>
         </main>
         {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'conversation' && <SavePromptModal onSave={saveConversationToCloud} />}
       </div>
     );
   }
@@ -2002,6 +2447,15 @@ export default function App() {
                       <Download size={20} />
                       Save Offline
                     </button>
+                    {authToken && (
+                      <button
+                        onClick={() => { setShowSavePrompt('paragraph'); setSaveName(''); }}
+                        className="px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 bg-emerald-600 text-white hover:bg-emerald-500"
+                      >
+                        <Save size={20} />
+                        Save to Cloud
+                      </button>
+                    )}
                   </div>
 
                   {/* Pinyin Display */}
@@ -2138,6 +2592,8 @@ export default function App() {
             </div>
         </main>
         {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'paragraph' && <SavePromptModal onSave={saveParagraphToCloud} />}
       </div>
     );
   }
@@ -2242,6 +2698,8 @@ export default function App() {
           </div>
         </div>
         {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
       </div>
     );
   }
@@ -2472,6 +2930,18 @@ export default function App() {
             <Shuffle size={20} />
           </button>
 
+          {authToken && currentDeckId && !isFinished && (
+            <button onClick={pauseAndSaveProgress} className={navBtnClass} title="Pause & Save Progress">
+              <Clock size={20} />
+            </button>
+          )}
+
+          {authToken && (
+            <button onClick={() => { setShowSavePrompt('deck'); setSaveName(''); }} className={navBtnClass} title="Save Deck to Cloud">
+              <Save size={20} />
+            </button>
+          )}
+
           {!isOfflineMode && (
             <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
               <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
@@ -2576,6 +3046,9 @@ export default function App() {
         </div>
       )}
       {showSettings && <SettingsModal />}
+      {showLibrary && <LibraryModal />}
+      {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
+      {pendingResume && <PendingResumePrompt />}
 
       <style>{`
         .perspective-1000 { perspective: 1000px; }
