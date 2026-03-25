@@ -5,7 +5,7 @@ import {
   Trophy, AlertCircle, Eye, EyeOff, RefreshCw, BrainCircuit,
   GraduationCap, Star, Smile, Frown, Meh, AlertTriangle, XCircle,
   BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap,
-  LogIn, LogOut, Library, Save, PlayCircle
+  LogIn, LogOut, Library, Save, PlayCircle, User
 } from 'lucide-react';
 
 /*
@@ -394,7 +394,6 @@ export default function App() {
 
   // Current saved deck id (links active session to DB for progress saving)
   const [currentDeckId, setCurrentDeckId] = useState(null);
-  const [pendingResume, setPendingResume] = useState(null); // { deckId, progress } | null
 
   const effectiveKey = customKey || envApiKey;
 
@@ -559,7 +558,6 @@ export default function App() {
     setAuthToken(null);
     setAuthUser(null);
     setCurrentDeckId(null);
-    setPendingResume(null);
   };
 
   // Validate stored token on mount and restore username from JWT payload.
@@ -609,7 +607,7 @@ export default function App() {
       try {
         const progress = await callAPI(`/api/progress/${deck.id}`);
         if (progress && !progress.is_finished) {
-          setPendingResume({ deckId: deck.id, progress });
+          applyResume(progress);
         }
       } catch { /* no progress */ }
     }
@@ -622,17 +620,30 @@ export default function App() {
     setSessionDuration(progress.session_duration);
     setIsFinished(progress.is_finished === 1);
     setIsBonusWindow(progress.is_bonus_window === 1);
-    setPendingResume(null);
   };
 
   // --- Cloud Save Functions ---
   const saveDeckToCloud = async () => {
     if (!saveName.trim()) return;
     try {
-      await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards });
+      const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards });
+      setCurrentDeckId(data.id);
       setShowSavePrompt(null);
       setSaveName('');
       if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
+      // Save current progress immediately after deck is created
+      try {
+        await callAPI(`/api/progress/${data.id}`, 'PUT', {
+          currentIndex,
+          cardStatuses,
+          score,
+          sessionDuration: Date.now() - startTime,
+          isFinished,
+          isBonusWindow,
+        });
+      } catch (e) {
+        console.error('Initial progress save failed:', e);
+      }
     } catch (e) {
       console.error('Save deck failed:', e);
     }
@@ -662,8 +673,8 @@ export default function App() {
     }
   };
 
-  const pauseAndSaveProgress = async () => {
-    if (!currentDeckId) return;
+  const saveProgressSilent = useCallback(async () => {
+    if (!currentDeckId || !authToken) return;
     try {
       await callAPI(`/api/progress/${currentDeckId}`, 'PUT', {
         currentIndex,
@@ -673,11 +684,24 @@ export default function App() {
         isFinished,
         isBonusWindow,
       });
-      if (soundEnabled) SoundFX.playTone(600, 'sine', 0.15);
     } catch (e) {
-      console.error('Save progress failed:', e);
+      console.error('Auto-save progress failed:', e);
     }
-  };
+  }, [currentDeckId, authToken, currentIndex, cardStatuses, score, startTime, isFinished, isBonusWindow]);
+
+  // Auto-save every 10 cards
+  useEffect(() => {
+    if (currentDeckId && authToken && currentIndex > 0) {
+      saveProgressSilent();
+    }
+  }, [currentIndex, currentDeckId, authToken, saveProgressSilent]);
+
+  // Auto-save on browser close / tab unload
+  useEffect(() => {
+    const handleUnload = () => { saveProgressSilent(); };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
+  }, [saveProgressSilent]);
 
   // --- Keyboard Shortcuts ---
   // Scope is primarily flashcard mode to avoid mode-crossing key collisions.
@@ -1017,7 +1041,28 @@ export default function App() {
       }).filter(Boolean);
     };
 
-    const applyDeckFromJson = (payload) => {
+    const deckName = file.name.replace(/\.[^.]+$/, '');
+
+    const saveDeckAndRefresh = async (deck) => {
+      setCards(deck);
+      resetSession(deck);
+      setAppMode('flashcards');
+      if (authToken) {
+        try {
+          const data = await callAPI('/api/decks', 'POST', { name: deckName, cards: deck });
+          setCurrentDeckId(data.id);
+          await callAPI(`/api/progress/${data.id}`, 'PUT', {
+            currentIndex: 0, cardStatuses: deck.map(() => 'unvisited'),
+            score: 0, sessionDuration: 0, isFinished: false, isBonusWindow: false,
+          });
+          await loadLibrary();
+        } catch (e) {
+          console.error('Auto-save after upload failed:', e);
+        }
+      }
+    };
+
+    const applyDeckFromJson = async (payload) => {
       if (!Array.isArray(payload)) return false;
       const deck = payload
         .map((item, idx) => {
@@ -1032,10 +1077,8 @@ export default function App() {
           };
         })
         .filter(Boolean);
-
       if (!deck.length) return false;
-      setCards(deck);
-      resetSession(deck);
+      await saveDeckAndRefresh(deck);
       return true;
     };
 
@@ -1047,7 +1090,7 @@ export default function App() {
         const parsed = JSON.parse(jsonText);
         const loadedParagraph = parsed?.type === 'paragraph-snapshot' && applyParagraphSnapshot(parsed);
         const loadedConversation = !loadedParagraph && parsed?.type === 'conversation-snapshot' && applyConversationSnapshot(parsed);
-        const loadedDeck = !loadedParagraph && !loadedConversation && applyDeckFromJson(parsed);
+        const loadedDeck = !loadedParagraph && !loadedConversation && await applyDeckFromJson(parsed);
         if (loadedParagraph || loadedConversation || loadedDeck) return;
       } catch (err) {
         console.error('Invalid JSON upload:', err);
@@ -1064,9 +1107,9 @@ export default function App() {
     }
 
     if (newDeck.length > 0) {
-      setCards(newDeck);
-      resetSession(newDeck);
+      await saveDeckAndRefresh(newDeck);
     }
+    e.target.value = '';
   };
 
   // --- AI Actions ---
@@ -1144,7 +1187,7 @@ export default function App() {
   // --- Paragraph Practice Logic ---
   // Two-stage generation:
   // 1) paragraph (+ optional questions)
-  // 2) pinyin + English translation enrichment
+  // 2) pinyin + English translation enrichment 
   const startParagraphGeneration = async () => {
     if (isOfflineMode) return;
     if (!effectiveKey) { setShowSettings(true); return; }
@@ -1543,30 +1586,15 @@ export default function App() {
       </div>
 
       <div className="flex gap-2">
-        <button
-          onClick={toggleOfflineMode}
-          className={`px-3 rounded-xl text-xs font-black tracking-wider transition-colors ${isOfflineMode ? 'bg-amber-500 text-white hover:bg-amber-400' : 'bg-emerald-500 text-white hover:bg-emerald-400'}`}
-          title="Toggle offline mode"
-        >
-          {isOfflineMode ? 'OFFLINE' : 'ONLINE'}
-        </button>
         {authToken && (
-          <button onClick={() => { loadLibrary(); setShowLibrary(true); }} className={iconBtnClass} title="My Library">
-            <Library size={20} />
+          <button onClick={() => { loadLibrary(); setShowLibrary(true); }} className={`${iconBtnClass} flex items-center gap-1.5`} title="My Library">
+            <Library size={20} /><span className="text-sm font-bold hidden sm:inline">Library</span>
           </button>
         )}
         <button onClick={() => setShowSettings(true)} className={`${iconBtnClass} ${!effectiveKey ? 'animate-pulse text-indigo-500 ring-2 ring-indigo-500' : ''}`}>
-          <Settings size={20} />
-        </button>
-        <button onClick={() => fileInputRef.current.click()} className={iconBtnClass}>
-          <Upload size={20} />
+          <User size={20} />
         </button>
         <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" accept=".csv,.txt,.docx,.json" />
-        {authToken && (
-          <button onClick={handleLogout} className={iconBtnClass} title={`Logout (${authUser?.username})`}>
-            <LogOut size={20} />
-          </button>
-        )}
       </div>
     </header>
   );
@@ -1770,29 +1798,16 @@ export default function App() {
               ))
           )}
         </div>
+
+      <div className={`p-4 border-t ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+        <button onClick={() => fileInputRef.current.click()} className={`w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
+          <Upload size={15} /> Upload {libraryTab === 'decks' ? 'Flashcards' : libraryTab === 'paragraphs' ? 'Paragraph' : 'Conversation'}
+        </button>
       </div>
     </div>
+  </div>
   );
 
-  // PendingResumePrompt: shown after loading a deck that has a saved in-progress session.
-  const PendingResumePrompt = () => (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/40">
-      <div className={`w-full max-w-sm p-6 rounded-3xl shadow-2xl border ${cardBg}`}>
-        <h3 className="font-black text-lg mb-2">Saved Progress Found</h3>
-        <p className="text-slate-500 text-sm mb-6">
-          You were on card {(pendingResume?.progress?.current_index ?? 0) + 1} with {pendingResume?.progress?.score ?? 0} pts. Resume where you left off?
-        </p>
-        <div className="flex gap-3">
-          <button onClick={() => setPendingResume(null)} className={`flex-1 py-3 rounded-xl font-bold ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
-            Start Fresh
-          </button>
-          <button onClick={() => applyResume(pendingResume.progress)} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold">
-            Resume
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 
   // --- Views ---
   // Mode-specific UI is kept in sequential early returns for readability.
@@ -2731,7 +2746,7 @@ export default function App() {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
         <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl border ${isDarkMode ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
-          <div className="flex justify-between items-center mb-6">
+          <div className="flex justify-between items-center mb-4">
             <h3 className="text-xl font-black flex items-center gap-2">
               <Settings className="text-indigo-500" /> Settings
             </h3>
@@ -2740,8 +2755,22 @@ export default function App() {
             </button>
           </div>
 
+          {authToken && (
+            <div className={`flex items-center justify-between p-3 rounded-2xl mb-4 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
+                  {(authUser?.username?.[0] || '?').toUpperCase()}
+                </div>
+                <span className="font-bold text-sm">{authUser?.username}</span>
+              </div>
+              <button onClick={() => { handleLogout(); setShowSettings(false); }} className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-red-500/10 text-red-500 hover:bg-red-500/20 transition-colors">
+                <LogOut size={14} /> Log out
+              </button>
+            </div>
+          )}
+
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <button
                 onClick={() => setSoundEnabled((prev) => !prev)}
                 className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
@@ -2768,6 +2797,18 @@ export default function App() {
               >
                 {isDarkMode ? <Moon size={16} /> : <Sun size={16} className="text-amber-500" />}
                 {isDarkMode ? 'Dark Mode' : 'Light Mode'}
+              </button>
+
+              <button
+                onClick={toggleOfflineMode}
+                className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
+                  isOfflineMode
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-500'
+                    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600'
+                }`}
+                title="Toggle offline mode"
+              >
+                {isOfflineMode ? 'Offline' : 'Online'}
               </button>
             </div>
 
@@ -2859,7 +2900,9 @@ export default function App() {
         />
 
         {/* The Card */}
-        <div className="relative h-96 w-full perspective-1000 group mb-8" onClick={() => setIsFlipped(!isFlipped)}>
+        <div className="relative mb-8">
+          <button onClick={prevCard} className={`${navBtnClass} absolute -left-20 top-1/2 -translate-y-1/2 z-10`}><ChevronLeft /></button>
+        <div className="relative h-96 w-full perspective-1000 group" onClick={() => setIsFlipped(!isFlipped)}>
           <div className={`relative w-full h-full transition-all duration-500 preserve-3d cursor-pointer ${isFlipped ? 'rotate-y-180' : ''}`}>
             
             {/* Front - Text size increased to 9xl */}
@@ -2917,24 +2960,18 @@ export default function App() {
             </div>
           </div>
         </div>
+          <button onClick={nextCard} className={`${navBtnClass} absolute -right-20 top-1/2 -translate-y-1/2 z-10`}><ChevronRight /></button>
+        </div>
 
-        {/* Nav Controls - MOVED UP */}
+        {/* Nav Controls */}
         <div className="flex gap-2 mb-4">
-          <button onClick={prevCard} className={navBtnClass}><ChevronLeft /></button>
-          
           <button onClick={() => resetSession()} className={navBtnClass} title="Restart Deck">
             <RotateCcw size={20} />
           </button>
-          
+
           <button onClick={shuffleDeck} className={navBtnClass} title="Shuffle Deck">
             <Shuffle size={20} />
           </button>
-
-          {authToken && currentDeckId && !isFinished && (
-            <button onClick={pauseAndSaveProgress} className={navBtnClass} title="Pause & Save Progress">
-              <Clock size={20} />
-            </button>
-          )}
 
           {authToken && (
             <button onClick={() => { setShowSavePrompt('deck'); setSaveName(''); }} className={navBtnClass} title="Save Deck to Cloud">
@@ -2947,8 +2984,6 @@ export default function App() {
               <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
             </button>
           )}
-          
-          <button onClick={nextCard} className={navBtnClass}><ChevronRight /></button>
         </div>
 
         {/* AI Context Section */}
@@ -3048,7 +3083,6 @@ export default function App() {
       {showSettings && <SettingsModal />}
       {showLibrary && <LibraryModal />}
       {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
-      {pendingResume && <PendingResumePrompt />}
 
       <style>{`
         .perspective-1000 { perspective: 1000px; }

@@ -14,7 +14,7 @@ The app is intentionally implemented as one main file: `src/App.jsx`.
 Backend: Node.js + Express on port 3001 with SQLite (`server/tocfl.db`). Start both together with `npm run dev`.
 
 Global feature flags:
-- **Offline mode**: Disables all AI/network features. Persisted in `localStorage` (`tocfl_mode = 'offline'`). Toggled via the header ONLINE/OFFLINE button.
+- **Offline mode**: Disables all AI/network features. Persisted in `localStorage` (`tocfl_mode = 'offline'`). Toggled via the **Online/Offline** button inside the Settings modal.
 
 ## 2. High-Level Architecture
 
@@ -83,27 +83,29 @@ Users must log in before the app loads (full-screen auth gate).
 - Logout clears the token and returns to the auth gate.
 
 ### 3a.2 Cloud Saves
-All saves are scoped to the logged-in user. Available via the **Library** button (book icon) in the header.
+All saves are scoped to the logged-in user. Available via the **Library** button (icon + "Library" text) in the header.
 
 **Flashcard Decks**
-- **Save Deck** button (cloud icon) in the flashcard nav row opens a name prompt and saves the current deck to the server.
+- **Save Deck** button (floppy disk icon) in the flashcard nav row opens a name prompt, saves the deck to the server, sets `currentDeckId`, and immediately records an initial progress entry.
+- Uploading a file via Library → Upload also auto-saves the deck using the filename as the name, sets `currentDeckId`, and refreshes the library in place.
 - Library → Decks tab shows all saved decks with card count and an "In-progress session saved" badge if progress exists.
-- Load / Resume: loads the deck into the flashcard session; if a paused session exists a resume prompt appears.
+- **Load / Resume**: loading a deck from the library restores saved progress automatically — no prompt. The session resumes at the exact card and score where it was last saved.
 
-**Flashcard Progress**
-- **Pause & Save** button (clock icon) in the flashcard nav row — only visible when a saved deck (`currentDeckId`) is active and the session is not finished.
-- Saves: `currentIndex`, `cardStatuses` (per-card unvisited/correct/wrong/missed), `score`, `sessionDuration`, `isFinished`, `isBonusWindow`.
+**Flashcard Progress (Auto-save)**
+- Progress is saved automatically on every card advance (no manual button).
+- Also saved on browser tab close / window unload via `beforeunload`.
+- Saves: `currentIndex`, `cardStatuses`, `score`, `sessionDuration`, `isFinished`, `isBonusWindow`.
 - One progress row per user per deck (upsert). Deleted automatically when a deck is deleted (cascade).
+- Progress saving requires `currentDeckId` to be set (i.e. the deck must have been saved to cloud first).
 
 **Paragraphs and Conversations**
-- **Save to Cloud** button (emerald, cloud icon) in paragraph-practice and conversation-practice views, alongside the existing "Save Offline" download button.
+- **Save to Cloud** button in paragraph-practice and conversation-practice views.
 - Saves the full `paragraphData`/`conversationData` + config. Load restores the practice view instantly.
 
 ### 3a.3 State Variables (Auth)
 - `authToken` — JWT string or null; initialized from `localStorage('tocfl_auth_token')`.
 - `authUser` — `{ username }` or null.
 - `currentDeckId` — integer id of the currently-active saved deck, or null for local/uploaded decks.
-- `pendingResume` — `{ deckId, progress }` or null; triggers the resume prompt.
 - `showLibrary`, `libraryTab`, `savedDecks`, `savedParagraphs`, `savedConversations` — Library modal state.
 - `showSavePrompt` — `null | 'deck' | 'paragraph' | 'conversation'`; controls which save flow is active.
 
@@ -113,7 +115,7 @@ When `isOfflineMode` is `true`:
 - All `callGemini` / generation entry-points (smart sentence, paragraph, conversation, TTS, chat) return early without network calls.
 - Keyboard shortcuts that trigger network actions (Tab → open chat, Shift → generate sentence) are suppressed.
 - AI-feature buttons are hidden or replaced with placeholder UI.
-- The header shows an **OFFLINE** badge (amber). Clicking it toggles back to online.
+- The **Online/Offline** toggle lives in the Settings modal (3-column grid alongside Sound and Dark Mode buttons). Amber = offline, green = online.
 - State persisted via `localStorage` key `tocfl_mode` (`'offline'` | `'online'`).
 
 Offline mode does **not** affect: flashcard navigation, file upload/parsing, scoring, TTS playback from pre-loaded `src` URLs, deck export, and snapshot load.
@@ -174,12 +176,15 @@ Conversation speaker behavior:
 
 ## 7. File Upload and Deck Parsing
 
+Upload entry point: **Library modal → Upload button** (bottom of modal, label changes to match the active tab: "Upload Flashcards / Paragraph / Conversation"). The standalone Upload button was removed from the header.
+
 Supported formats:
-- `.csv`, `.txt`, `.docx`
+- `.csv`, `.txt`, `.docx`, `.json` (deck array or paragraph/conversation snapshot)
 
 Parsing notes:
 - CSV-like parsing with basic comma handling.
 - `.docx` uses `mammoth` browser bundle loaded dynamically.
+- After a successful deck upload, if the user is logged in, the deck is auto-saved to cloud using the filename (without extension) as the name, `currentDeckId` is set, the library is refreshed, and progress saving activates immediately.
 
 ## 8. Keyboard Shortcuts (Flashcards)
 
@@ -198,9 +203,12 @@ API key precedence:
 1. User key saved in localStorage (`gemini_key`)
 2. Env key (`VITE_GEMINI_API_KEY` from `.env.local`)
 
-Settings modal supports:
-- Key entry
-- Connection test
+Settings modal layout (top to bottom):
+- **User info bar** (when logged in): avatar initial, username, Log Out button.
+- **3-column toggle grid**: Sound On/Off · Dark/Light Mode · Online/Offline.
+- **Gemini API Key** input + connection test.
+
+Header icon: the settings button now shows a **User** icon (not a gear).
 
 ## 10. Performance and Reliability Notes
 

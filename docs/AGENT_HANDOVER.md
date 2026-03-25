@@ -107,8 +107,7 @@ Security note:
 
 Flashcards (frontend state):
 - cards, currentIndex, cardStatuses, score, timerKey, isBonusWindow
-- currentDeckId: id of the currently-loaded saved deck (null if using default/uploaded deck)
-- pendingResume: { deckId, progress } — set when a loaded deck has a saved in-progress session
+- currentDeckId: id of the currently-loaded saved deck (null if using default/uploaded deck not yet saved)
 
 Paragraph mode:
 - paragraphConfig
@@ -164,12 +163,13 @@ Before handing back:
 6. Conversation per-turn speaker button plays audio.
 7. Full conversation playback button works.
 8. Conversation question toggles and answer validation work.
-9. Settings modal key save/test flow still works.
+9. Settings modal: user info bar shows username; logout button works; Online/Offline toggle works.
 10. Auth gate appears on first load; login/register works.
-11. Save Deck → library shows it; Load from library works.
-12. Pause & Save mid-session → reload → resume prompt appears with correct card index.
-13. Save to Cloud in paragraph/conversation practice → Library → load restores the content.
-14. Logout clears auth; app returns to login screen.
+11. Save Deck → library shows it; Load from library resumes at correct card (no prompt).
+12. Advance cards → close browser → reopen → load deck from library → progress restored automatically.
+13. Upload flashcard file via Library → deck appears in library list and loads into flashcard view.
+14. Save to Cloud in paragraph/conversation practice → Library → load restores the content.
+15. Logout clears auth; app returns to login screen.
 
 ## 10. Git Workflow Notes
 
@@ -194,7 +194,10 @@ If rebase conflict occurs:
 - Adding a new backend-saving feature without gating it on `authToken` — always check token is present before showing save buttons.
 - Adding a new mode view without adding `{showLibrary && <LibraryModal />}` to its return — the Library button is in the shared Header so it can be opened from any mode.
 - Forgetting to reset `currentDeckId` when the user uploads a new local deck (it should be null for non-saved decks).
-- `applyParagraphSnapshot` and `applyConversationSnapshot` are now at component scope (not inside `handleFileUpload`) — call them directly from Library modal or any other consumer.
+- `applyParagraphSnapshot` and `applyConversationSnapshot` are at component scope — call them directly from Library modal or any other consumer.
+- `saveProgressSilent` depends on `currentDeckId` being set — if it's null (no saved deck), progress is never written. Always ensure `currentDeckId` is set before expecting auto-save to work.
+- The Online/Offline toggle is inside the Settings modal, not the header. Do not add a header badge for it.
+- The upload button is inside the Library modal footer only — not in the header. Triggering `fileInputRef.current.click()` from the Library footer is the sole upload entry point.
 
 ## 12. Quick Orientation for Next Agent
 
