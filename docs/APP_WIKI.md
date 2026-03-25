@@ -11,6 +11,8 @@ Core modes:
 
 The app is intentionally implemented as one main file: `src/App.jsx`.
 
+Backend: Node.js + Express on port 3001 with SQLite (`server/tocfl.db`). Start both together with `npm run dev`.
+
 Global feature flags:
 - **Offline mode**: Disables all AI/network features. Persisted in `localStorage` (`tocfl_mode = 'offline'`). Toggled via the header ONLINE/OFFLINE button.
 
@@ -70,7 +72,42 @@ Flow:
 4. Play per-turn or full conversation audio.
 5. Answer listening questions.
 
-## 3a. Offline Mode
+## 3a. User Account System
+
+Users must log in before the app loads (full-screen auth gate).
+
+### 3a.1 Authentication
+- Register with a unique username (min 3 chars) and password (min 6 chars).
+- Passwords hashed with bcryptjs. JWT issued on register/login (30-day expiry).
+- Token stored in `localStorage` (`tocfl_auth_token`). Validated on every page load via a bootstrap effect.
+- Logout clears the token and returns to the auth gate.
+
+### 3a.2 Cloud Saves
+All saves are scoped to the logged-in user. Available via the **Library** button (book icon) in the header.
+
+**Flashcard Decks**
+- **Save Deck** button (cloud icon) in the flashcard nav row opens a name prompt and saves the current deck to the server.
+- Library → Decks tab shows all saved decks with card count and an "In-progress session saved" badge if progress exists.
+- Load / Resume: loads the deck into the flashcard session; if a paused session exists a resume prompt appears.
+
+**Flashcard Progress**
+- **Pause & Save** button (clock icon) in the flashcard nav row — only visible when a saved deck (`currentDeckId`) is active and the session is not finished.
+- Saves: `currentIndex`, `cardStatuses` (per-card unvisited/correct/wrong/missed), `score`, `sessionDuration`, `isFinished`, `isBonusWindow`.
+- One progress row per user per deck (upsert). Deleted automatically when a deck is deleted (cascade).
+
+**Paragraphs and Conversations**
+- **Save to Cloud** button (emerald, cloud icon) in paragraph-practice and conversation-practice views, alongside the existing "Save Offline" download button.
+- Saves the full `paragraphData`/`conversationData` + config. Load restores the practice view instantly.
+
+### 3a.3 State Variables (Auth)
+- `authToken` — JWT string or null; initialized from `localStorage('tocfl_auth_token')`.
+- `authUser` — `{ username }` or null.
+- `currentDeckId` — integer id of the currently-active saved deck, or null for local/uploaded decks.
+- `pendingResume` — `{ deckId, progress }` or null; triggers the resume prompt.
+- `showLibrary`, `libraryTab`, `savedDecks`, `savedParagraphs`, `savedConversations` — Library modal state.
+- `showSavePrompt` — `null | 'deck' | 'paragraph' | 'conversation'`; controls which save flow is active.
+
+## 3b. Offline Mode
 
 When `isOfflineMode` is `true`:
 - All `callGemini` / generation entry-points (smart sentence, paragraph, conversation, TTS, chat) return early without network calls.
@@ -81,7 +118,33 @@ When `isOfflineMode` is `true`:
 
 Offline mode does **not** affect: flashcard navigation, file upload/parsing, scoring, TTS playback from pre-loaded `src` URLs, deck export, and snapshot load.
 
-## 4. AI Integration
+## 4. Backend API
+
+All endpoints require `Authorization: Bearer <jwt>` except `/api/auth/*`.
+
+Frontend calls go through `callAPI(path, method, body)` — defined at module level in `src/App.jsx`, reads token from localStorage on each call.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/auth/register` | Create account → `{ token, username }` |
+| POST | `/api/auth/login` | Sign in → `{ token, username }` |
+| GET | `/api/decks` | List user's decks (includes `has_progress` flag) |
+| POST | `/api/decks` | Save deck `{ name, cards }` |
+| DELETE | `/api/decks/:id` | Delete deck (cascades progress) |
+| GET | `/api/progress/:deckId` | Get saved progress for a deck |
+| PUT | `/api/progress/:deckId` | Upsert progress (pause/save) |
+| DELETE | `/api/progress/:deckId` | Clear progress (session reset) |
+| GET | `/api/paragraphs` | List paragraph saves |
+| GET | `/api/paragraphs/:id` | Get full paragraph save |
+| POST | `/api/paragraphs` | Save paragraph `{ name, paragraphConfig, paragraphData }` |
+| DELETE | `/api/paragraphs/:id` | Delete paragraph save |
+| GET | `/api/conversations` | List conversation saves |
+| GET | `/api/conversations/:id` | Get full conversation save |
+| POST | `/api/conversations` | Save conversation `{ name, conversationConfig, conversationData }` |
+| DELETE | `/api/conversations/:id` | Delete conversation save |
+| GET | `/api/health` | Server liveness check |
+
+## 5. AI Integration
 
 Primary helper:
 - `callGemini(prompt, systemInstruction, key, responseMimeType)`
@@ -95,7 +158,7 @@ Other helpers:
 - `generateImage(...)` for optional image generation.
 - `generateTTS(...)` for Gemini audio fallback.
 
-## 5. Audio Pipeline
+## 6. Audio Pipeline
 
 ### 5.1 Sound Effects
 - Uses `AudioContext` via `SoundFX` for correct/wrong/bonus/victory feedback.
@@ -109,7 +172,7 @@ Preferred order for content speech:
 Conversation speaker behavior:
 - Speaker names are mapped to alternating voice preferences (`female`, `male`) when browser voices allow.
 
-## 6. File Upload and Deck Parsing
+## 7. File Upload and Deck Parsing
 
 Supported formats:
 - `.csv`, `.txt`, `.docx`
@@ -118,7 +181,7 @@ Parsing notes:
 - CSV-like parsing with basic comma handling.
 - `.docx` uses `mammoth` browser bundle loaded dynamically.
 
-## 7. Keyboard Shortcuts (Flashcards)
+## 8. Keyboard Shortcuts (Flashcards)
 
 - Right/Left arrows: next/previous card
 - Up: flip
@@ -129,7 +192,7 @@ Parsing notes:
 - Tab: open chat
 - Alt/CapsLock: play TTS for current card
 
-## 8. Settings and API Key
+## 9. Settings and API Key
 
 API key precedence:
 1. User key saved in localStorage (`gemini_key`)
@@ -139,7 +202,7 @@ Settings modal supports:
 - Key entry
 - Connection test
 
-## 9. Performance and Reliability Notes
+## 10. Performance and Reliability Notes
 
 Current optimizations:
 - `useMemo` for status stats and session summary.
@@ -150,7 +213,7 @@ Reliability:
 - TTS includes timeout/fallback handling.
 - Gemini requests include retry/fallback model strategy.
 
-## 10. Snapshot System
+## 11. Snapshot System
 
 Both paragraph and conversation modes support saving and loading JSON snapshots.
 
@@ -165,7 +228,7 @@ Both paragraph and conversation modes support saving and loading JSON snapshots.
 - The payload is dispatched through `applyParagraphFromJson` or `applyConversationFromJson` based on `payload.type`.
 - Snapshots always reset the relevant answer/translation/reveal states before applying new data.
 
-## 11. Extension Guide for Future Agents
+## 12. Extension Guide for Future Agents
 
 When adding a new mode:
 1. Add mode state and config state.
