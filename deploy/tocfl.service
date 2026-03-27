@@ -1,0 +1,25 @@
+# systemd unit file — keeps the Express server running and restarts it on crash.
+#
+# Setup steps on the Pi:
+# 1. Copy this file to /etc/systemd/system/tocfl.service
+# 2. Edit WorkingDirectory and EnvironmentFile paths to match where you cloned the repo
+# 3. Run: sudo systemctl daemon-reload
+# 4. Run: sudo systemctl enable tocfl   (auto-start on boot)
+# 5. Run: sudo systemctl start tocfl
+# 6. Check status: sudo systemctl status tocfl
+
+[Unit]
+Description=TOCFL FlashcardApp Express Server
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/TOCFL_FlashcardApp/server
+EnvironmentFile=/home/pi/TOCFL_FlashcardApp/server/.env
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
