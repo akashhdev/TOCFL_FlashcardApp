@@ -5,7 +5,7 @@ import {
   Trophy, AlertCircle, Eye, EyeOff, RefreshCw, BrainCircuit,
   GraduationCap, Star, Smile, Frown, Meh, AlertTriangle, XCircle,
   BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap,
-  LogIn, LogOut, Library, Save, PlayCircle, User
+  LogIn, LogOut, Library, Save, PlayCircle, User, Circle, ListChecks
 } from 'lucide-react';
 
 /*
@@ -430,6 +430,11 @@ export default function App() {
 
   // Post-session review state for flashcards summary screen.
   const [revealedReviewItems, setRevealedReviewItems] = useState({});
+  const [showAllWords, setShowAllWords] = useState(false);
+  const [selectedWordIndices, setSelectedWordIndices] = useState(new Set());
+
+  // Mixed deck state: holds merged cards while save-name prompt is open.
+  const [pendingMixedCards, setPendingMixedCards] = useState(null);
 
   const fileInputRef = useRef(null);
   const currentCard = cards[currentIndex] || {};
@@ -649,6 +654,30 @@ export default function App() {
     }
   };
 
+  const saveMixedDeckToCloud = async () => {
+    if (!saveName.trim() || !pendingMixedCards) return;
+    const mergedCards = pendingMixedCards;
+    try {
+      const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards: mergedCards });
+      setCurrentDeckId(data.id);
+      setShowSavePrompt(null);
+      setSaveName('');
+      setPendingMixedCards(null);
+      setShowLibrary(false);
+      resetSession(mergedCards);
+      setAppMode('flashcards');
+      if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
+      try {
+        await callAPI(`/api/progress/${data.id}`, 'PUT', {
+          currentIndex: 0, cardStatuses: mergedCards.map(() => 'unvisited'),
+          score: 0, sessionDuration: 0, isFinished: false, isBonusWindow: false,
+        });
+      } catch (e) { console.error('Initial progress save failed:', e); }
+    } catch (e) {
+      console.error('Save mixed deck failed:', e);
+    }
+  };
+
   const saveParagraphToCloud = async () => {
     if (!saveName.trim()) return;
     try {
@@ -857,6 +886,8 @@ export default function App() {
     setAiSentence(null);
     setIsContextRevealed(false);
     setRevealedReviewItems({});
+    setShowAllWords(false);
+    setSelectedWordIndices(new Set());
     setStartTime(Date.now());
     setSessionDuration(0);
     resetTimer();
@@ -1696,117 +1727,270 @@ export default function App() {
     </div>
   );
 
-  // LibraryModal: browse and load saved decks, paragraphs, conversations.
-  const LibraryModal = () => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
-      <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
-        <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
-          <h3 className="font-black text-lg flex items-center gap-2"><Library className="text-indigo-500" size={20}/> My Library</h3>
-          <button onClick={() => setShowLibrary(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
-        </div>
+  // AllWordsModal: shows every card in the current deck with status badges and
+  // individual checkboxes so the user can build a custom review deck.
+  const AllWordsModal = () => {
+    const [revealedItems, setRevealedItems] = useState({});
+    const allSelected = selectedWordIndices.size === cards.length;
 
-        <div className={`flex border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
-          {['decks', 'paragraphs', 'conversations'].map(tab => (
-            <button
-              key={tab}
-              onClick={() => setLibraryTab(tab)}
-              className={`flex-1 py-3 text-sm font-bold capitalize transition-colors ${libraryTab === tab ? 'text-indigo-500 border-b-2 border-indigo-500' : 'text-slate-400'}`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
+    const toggleWord = (i) => {
+      setSelectedWordIndices(prev => {
+        const next = new Set(prev);
+        if (next.has(i)) next.delete(i); else next.add(i);
+        return next;
+      });
+    };
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-2">
-          {libraryLoading && <div className="text-center py-8 text-slate-500">Loading...</div>}
+    const toggleAll = () => {
+      setSelectedWordIndices(allSelected ? new Set() : new Set(cards.map((_, i) => i)));
+    };
 
-          {libraryTab === 'decks' && !libraryLoading && (
-            savedDecks.length === 0
-              ? <p className="text-center py-8 text-slate-500 text-sm">No saved decks yet.</p>
-              : savedDecks.map(deck => (
-                <div key={deck.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                  <div>
-                    <div className="font-bold">{deck.name}</div>
-                    <div className="text-xs text-slate-500">{deck.card_count} cards</div>
-                    {deck.has_progress === 1 && (
-                      <div className="text-xs text-indigo-500 font-bold flex items-center gap-1 mt-0.5">
-                        <PlayCircle size={12} /> In-progress session saved
+    const startCustomReview = () => {
+      const chosen = [...selectedWordIndices].sort((a, b) => a - b).map(i => cards[i]);
+      if (!chosen.length) return;
+      setShowAllWords(false);
+      resetSession(chosen);
+    };
+
+    const statusBadge = (status) => {
+      if (status === 'correct')   return <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0"><CheckCircle2 size={16} /></div>;
+      if (status === 'wrong')     return <div className="p-1.5 rounded-lg bg-red-500/10 text-red-500 shrink-0"><XCircle size={16} /></div>;
+      if (status === 'missed')    return <div className="p-1.5 rounded-lg bg-yellow-500/10 text-yellow-500 shrink-0"><AlertTriangle size={16} /></div>;
+      return <div className="p-1.5 rounded-lg shrink-0"><Circle size={16} className="text-slate-400" /></div>;
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
+          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            <h3 className="font-black text-lg flex items-center gap-2"><ListChecks className="text-indigo-500" size={20}/> All Words ({cards.length})</h3>
+            <button onClick={() => setShowAllWords(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-2">
+            {cards.map((card, i) => {
+              const status = cardStatuses[i] || 'unvisited';
+              const isSelected = selectedWordIndices.has(i);
+              return (
+                <div
+                  key={i}
+                  onClick={() => toggleWord(i)}
+                  className={`p-4 rounded-2xl border flex items-center justify-between cursor-pointer transition-colors ${isSelected ? (isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
+                >
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleWord(i)}
+                      onClick={e => e.stopPropagation()}
+                      className="w-4 h-4 accent-indigo-600 shrink-0 cursor-pointer"
+                    />
+                    {statusBadge(status)}
+                    <span className="text-2xl font-black">{card.char}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {revealedItems[i] ? (
+                      <div className="text-right">
+                        <div className="text-xs font-bold text-indigo-500">{card.pinyin}</div>
+                        <div className={`text-xs max-w-[110px] truncate ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{card.meaning}</div>
                       </div>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic">Hidden</span>
                     )}
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => loadDeckFromLibrary(deck)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition-all">
-                      {deck.has_progress === 1 ? 'Resume' : 'Load'}
-                    </button>
-                    <button onClick={async () => { await callAPI(`/api/decks/${deck.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all">
-                      <X size={16}/>
-                    </button>
-                  </div>
-                </div>
-              ))
-          )}
-
-          {libraryTab === 'paragraphs' && !libraryLoading && (
-            savedParagraphs.length === 0
-              ? <p className="text-center py-8 text-slate-500 text-sm">No saved paragraphs yet.</p>
-              : savedParagraphs.map(p => (
-                <div key={p.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                  <div>
-                    <div className="font-bold">{p.name}</div>
-                    <div className="text-xs text-slate-500">{new Date(p.created_at).toLocaleDateString()}</div>
-                  </div>
-                  <div className="flex gap-2">
                     <button
-                      onClick={async () => {
-                        const full = await callAPI(`/api/paragraphs/${p.id}`);
-                        applyParagraphSnapshot({ paragraphConfig: JSON.parse(full.paragraph_config), paragraphData: JSON.parse(full.paragraph_data) });
-                        setShowLibrary(false);
-                      }}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
-                    >Load</button>
-                    <button onClick={async () => { await callAPI(`/api/paragraphs/${p.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
-                      <X size={16}/>
-                    </button>
-                  </div>
-                </div>
-              ))
-          )}
-
-          {libraryTab === 'conversations' && !libraryLoading && (
-            savedConversations.length === 0
-              ? <p className="text-center py-8 text-slate-500 text-sm">No saved conversations yet.</p>
-              : savedConversations.map(c => (
-                <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                  <div>
-                    <div className="font-bold">{c.name}</div>
-                    <div className="text-xs text-slate-500">{new Date(c.created_at).toLocaleDateString()}</div>
-                  </div>
-                  <div className="flex gap-2">
+                      onClick={e => { e.stopPropagation(); copyToClipboard(card.char); }}
+                      className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
+                    ><Copy size={16}/></button>
                     <button
-                      onClick={async () => {
-                        const full = await callAPI(`/api/conversations/${c.id}`);
-                        applyConversationSnapshot({ conversationConfig: JSON.parse(full.conversation_config), conversationData: JSON.parse(full.conversation_data) });
-                        setShowLibrary(false);
-                      }}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
-                    >Load</button>
-                    <button onClick={async () => { await callAPI(`/api/conversations/${c.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
-                      <X size={16}/>
-                    </button>
+                      onClick={e => { e.stopPropagation(); setRevealedItems(p => ({...p, [i]: !p[i]})); }}
+                      className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
+                    >{revealedItems[i] ? <EyeOff size={16}/> : <Eye size={16}/>}</button>
                   </div>
                 </div>
-              ))
-          )}
+              );
+            })}
+          </div>
+
+          <div className={`p-4 border-t space-y-2 ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            <button
+              onClick={toggleAll}
+              className={`w-full py-2.5 rounded-xl text-sm font-bold transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+            >
+              {allSelected ? 'Deselect All' : 'Select All'}
+            </button>
+            <button
+              onClick={startCustomReview}
+              disabled={selectedWordIndices.size === 0}
+              className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-bold transition-all"
+            >
+              Start Custom Review ({selectedWordIndices.size})
+            </button>
+          </div>
         </div>
-
-      <div className={`p-4 border-t ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
-        <button onClick={() => fileInputRef.current.click()} className={`w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
-          <Upload size={15} /> Upload {libraryTab === 'decks' ? 'Flashcards' : libraryTab === 'paragraphs' ? 'Paragraph' : 'Conversation'}
-        </button>
       </div>
-    </div>
-  </div>
-  );
+    );
+  };
+
+  // LibraryModal: browse and load saved decks, paragraphs, conversations.
+  // Decks tab supports multi-select to mix two or more decks into a new combined deck.
+  const LibraryModal = () => {
+    const [selectedDeckIds, setSelectedDeckIds] = useState(new Set());
+
+    const toggleDeckSelect = (id) => {
+      setSelectedDeckIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+      });
+    };
+
+    const handleMixSelected = () => {
+      const mergedCards = [...selectedDeckIds].flatMap(id => {
+        const deck = savedDecks.find(d => d.id === id);
+        return deck ? JSON.parse(deck.cards_json || '[]') : [];
+      }).sort(() => Math.random() - 0.5);
+      const names = [...selectedDeckIds]
+        .map(id => savedDecks.find(d => d.id === id)?.name || '')
+        .filter(Boolean);
+      const label = names.length <= 2
+        ? names.join(' + ')
+        : `${names[0]} + ${names[1]} +${names.length - 2} more`;
+      setPendingMixedCards(mergedCards);
+      setSaveName(`${label} [Mixed]`);
+      setShowSavePrompt('mixed');
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
+          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            <h3 className="font-black text-lg flex items-center gap-2"><Library className="text-indigo-500" size={20}/> My Library</h3>
+            <button onClick={() => setShowLibrary(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
+          </div>
+
+          <div className={`flex border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
+            {['decks', 'paragraphs', 'conversations'].map(tab => (
+              <button
+                key={tab}
+                onClick={() => { setLibraryTab(tab); setSelectedDeckIds(new Set()); }}
+                className={`flex-1 py-3 text-sm font-bold capitalize transition-colors ${libraryTab === tab ? 'text-indigo-500 border-b-2 border-indigo-500' : 'text-slate-400'}`}
+              >
+                {tab}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-2">
+            {libraryLoading && <div className="text-center py-8 text-slate-500">Loading...</div>}
+
+            {libraryTab === 'decks' && !libraryLoading && (
+              savedDecks.length === 0
+                ? <p className="text-center py-8 text-slate-500 text-sm">No saved decks yet.</p>
+                : savedDecks.map(deck => {
+                  const isSelected = selectedDeckIds.has(deck.id);
+                  return (
+                    <div
+                      key={deck.id}
+                      className={`p-4 rounded-2xl border flex items-center gap-3 transition-colors ${isSelected ? (isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleDeckSelect(deck.id)}
+                        className="w-4 h-4 accent-indigo-600 shrink-0 cursor-pointer"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-bold truncate">{deck.name}</div>
+                        <div className="text-xs text-slate-500">{deck.card_count} cards</div>
+                        {deck.has_progress === 1 && (
+                          <div className="text-xs text-indigo-500 font-bold flex items-center gap-1 mt-0.5">
+                            <PlayCircle size={12} /> In-progress session saved
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <button onClick={() => loadDeckFromLibrary(deck)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition-all">
+                          {deck.has_progress === 1 ? 'Resume' : 'Load'}
+                        </button>
+                        <button onClick={async () => { await callAPI(`/api/decks/${deck.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all">
+                          <X size={16}/>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+            )}
+
+            {libraryTab === 'paragraphs' && !libraryLoading && (
+              savedParagraphs.length === 0
+                ? <p className="text-center py-8 text-slate-500 text-sm">No saved paragraphs yet.</p>
+                : savedParagraphs.map(p => (
+                  <div key={p.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className="min-w-0 flex-1 mr-3">
+                      <div className="font-bold truncate">{p.name}</div>
+                      <div className="text-xs text-slate-500">{new Date(p.created_at).toLocaleDateString()}</div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={async () => {
+                          const full = await callAPI(`/api/paragraphs/${p.id}`);
+                          applyParagraphSnapshot({ paragraphConfig: JSON.parse(full.paragraph_config), paragraphData: JSON.parse(full.paragraph_data) });
+                          setShowLibrary(false);
+                        }}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
+                      >Load</button>
+                      <button onClick={async () => { await callAPI(`/api/paragraphs/${p.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
+                        <X size={16}/>
+                      </button>
+                    </div>
+                  </div>
+                ))
+            )}
+
+            {libraryTab === 'conversations' && !libraryLoading && (
+              savedConversations.length === 0
+                ? <p className="text-center py-8 text-slate-500 text-sm">No saved conversations yet.</p>
+                : savedConversations.map(c => (
+                  <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className="min-w-0 flex-1 mr-3">
+                      <div className="font-bold truncate">{c.name}</div>
+                      <div className="text-xs text-slate-500">{new Date(c.created_at).toLocaleDateString()}</div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={async () => {
+                          const full = await callAPI(`/api/conversations/${c.id}`);
+                          applyConversationSnapshot({ conversationConfig: JSON.parse(full.conversation_config), conversationData: JSON.parse(full.conversation_data) });
+                          setShowLibrary(false);
+                        }}
+                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
+                      >Load</button>
+                      <button onClick={async () => { await callAPI(`/api/conversations/${c.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
+                        <X size={16}/>
+                      </button>
+                    </div>
+                  </div>
+                ))
+            )}
+          </div>
+
+          <div className={`p-4 border-t space-y-2 ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            {libraryTab === 'decks' && selectedDeckIds.size >= 2 && (
+              <button
+                onClick={handleMixSelected}
+                className="w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+              >
+                <Shuffle size={15} /> Mix Selected ({selectedDeckIds.size} decks · {[...selectedDeckIds].reduce((sum, id) => sum + (savedDecks.find(d => d.id === id)?.card_count || 0), 0)} cards)
+              </button>
+            )}
+            <button onClick={() => fileInputRef.current.click()} className={`w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
+              <Upload size={15} /> Upload {libraryTab === 'decks' ? 'Flashcards' : libraryTab === 'paragraphs' ? 'Paragraph' : 'Conversation'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
 
   // --- Views ---
@@ -1980,6 +2164,7 @@ export default function App() {
         </div>
         {showSettings && <SettingsModal />}
         {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
       </div>
     );
   }
@@ -2155,6 +2340,7 @@ export default function App() {
         </div>
         {showSettings && <SettingsModal />}
         {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
       </div>
     );
   }
@@ -2382,6 +2568,7 @@ export default function App() {
         {showSettings && <SettingsModal />}
         {showLibrary && <LibraryModal />}
         {showSavePrompt === 'conversation' && <SavePromptModal onSave={saveConversationToCloud} />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
       </div>
     );
   }
@@ -2609,6 +2796,7 @@ export default function App() {
         {showSettings && <SettingsModal />}
         {showLibrary && <LibraryModal />}
         {showSavePrompt === 'paragraph' && <SavePromptModal onSave={saveParagraphToCloud} />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
       </div>
     );
   }
@@ -2653,60 +2841,24 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto mb-6 pr-2 -mr-2 text-left space-y-3">
-             {reviewCards.length > 0 && <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 mb-2">Review Deck</h3>}
-             {reviewCards.map((card, idx) => (
-               <div key={idx} className={`p-4 rounded-2xl flex items-center justify-between group ${isDarkMode ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-900'}`}>
-                 <div className="flex items-center gap-3">
-                   {/* Badge */}
-                   {card.status === 'missed' ? 
-                       <div className="p-1.5 rounded-lg bg-yellow-500/10 text-yellow-500"><AlertTriangle size={16} /></div> : 
-                       <div className="p-1.5 rounded-lg bg-red-500/10 text-red-500"><XCircle size={16} /></div>
-                   }
-                   <span className="text-2xl font-black">{card.char}</span>
-                 </div>
-                 
-                 <div className="flex items-center gap-3">
-                   {revealedReviewItems[card.id] ? (
-                      <div className="text-right">
-                        <div className="text-xs font-bold text-indigo-500">{card.pinyin}</div>
-                        <div className={`text-xs max-w-[100px] truncate ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{card.meaning}</div>
-                      </div>
-                   ) : (
-                      <span className="text-xs text-slate-400 italic">Hidden</span>
-                   )}
-                   <button 
-                     onClick={() => copyToClipboard(card.char)}
-                     className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
-                   >
-                     <Copy size={16}/>
-                   </button>
-                   <button 
-                     onClick={() => setRevealedReviewItems(p => ({...p, [card.id]: !p[card.id]}))}
-                     className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
-                   >
-                     {revealedReviewItems[card.id] ? <EyeOff size={16}/> : <Eye size={16}/>}
-                   </button>
-                 </div>
-               </div>
-             ))}
-             {reviewCards.length === 0 && (
-               <div className="p-8 text-center text-slate-500 italic">Perfect run! No mistakes to review.</div>
-             )}
-          </div>
-
           <div className="space-y-3 shrink-0">
             {reviewCards.length > 0 && (
-              <button 
+              <button
                 onClick={() => resetSession(reviewCards)}
                 className="w-full py-4 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
               >
                 Start Review Deck ({reviewCards.length})
               </button>
             )}
-            <button 
-                onClick={() => resetSession()} 
-                className={`w-full py-4 rounded-xl font-bold transition-all ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-600'}`}
+            <button
+              onClick={() => setShowAllWords(true)}
+              className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-200' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
+            >
+              <ListChecks size={18} /> Select Custom Words
+            </button>
+            <button
+              onClick={() => resetSession()}
+              className={`w-full py-4 rounded-xl font-bold transition-all ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'}`}
             >
               Restart Full Deck
             </button>
@@ -2714,7 +2866,9 @@ export default function App() {
         </div>
         {showSettings && <SettingsModal />}
         {showLibrary && <LibraryModal />}
+        {showAllWords && <AllWordsModal />}
         {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
       </div>
     );
   }
@@ -3083,6 +3237,7 @@ export default function App() {
       {showSettings && <SettingsModal />}
       {showLibrary && <LibraryModal />}
       {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
+      {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
 
       <style>{`
         .perspective-1000 { perspective: 1000px; }

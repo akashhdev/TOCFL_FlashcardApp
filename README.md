@@ -20,17 +20,28 @@ Generate your own tocfl listening practice conversation based on your difficulty
 <img width="1080" height="1920" alt="image" src="src/assets/Demo-images/tocfl-prep-app-convo-practice-2.png" 
 
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Features
 
-Currently, two official plugins are available:
+- **Flashcard Drill** — score-tracked sessions with a 10-second bonus window, shuffle, and keyboard shortcuts
+- **Mix Decks** — select multiple saved decks in the Library and combine them into a new shuffled deck tagged `[Mixed]`
+- **Custom Word Review** — after any session, open *Select Custom Words* to cherry-pick individual cards by status (correct / wrong / missed / unvisited) and start a targeted review
+- **Paragraph Practice** — AI-generated TOCFL reading passages with pinyin, translation, and optional comprehension questions
+- **Conversation Practice** — AI-generated listening transcripts with per-turn audio playback and questions
+- **Cloud Library** — save decks, paragraphs, and conversations to the backend; progress is auto-saved on every card advance
+- **Offline Mode** — disables all AI/network features so you can drill saved content without a connection
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Stack
 
-## React Compiler
+- React 19 + Vite 7 + Tailwind CSS
+- Node.js + Express backend (port 3001) with SQLite (`server/tocfl.db`)
+- JWT authentication (30-day tokens)
+- Google Gemini API for AI generation
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Getting Started
 
-## Expanding the ESLint configuration
+```bash
+npm install
+npm run dev   # starts Vite (5173) + Express (3001) together
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Set `VITE_GEMINI_API_KEY` in `.env.local` or enter your key in the Settings modal.

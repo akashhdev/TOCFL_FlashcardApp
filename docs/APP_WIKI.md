@@ -39,12 +39,15 @@ Key state:
 - `currentIndex`: active card index.
 - `cardStatuses`: per-card status (`unvisited`, `correct`, `wrong`, `missed`).
 - `score`, `isBonusWindow`, `timerKey`.
+- `showAllWords`: boolean — controls AllWordsModal on result screen.
+- `selectedWordIndices`: Set of card indices selected in AllWordsModal.
+- `pendingMixedCards`: merged card array held while the mixed-deck name prompt is open.
 
 Flow:
 1. Card front/back interaction.
 2. User marks correct/wrong.
 3. Status and score update.
-4. Session completion computes summary and review deck.
+4. Session completion computes summary and shows result screen.
 
 ### 3.2 Paragraph Mode
 Key state:
@@ -88,8 +91,9 @@ All saves are scoped to the logged-in user. Available via the **Library** button
 **Flashcard Decks**
 - **Save Deck** button (floppy disk icon) in the flashcard nav row opens a name prompt, saves the deck to the server, sets `currentDeckId`, and immediately records an initial progress entry.
 - Uploading a file via Library → Upload also auto-saves the deck using the filename as the name, sets `currentDeckId`, and refreshes the library in place.
-- Library → Decks tab shows all saved decks with card count and an "In-progress session saved" badge if progress exists.
+- Library → Decks tab shows all saved decks with card count and an "In-progress session saved" badge if progress exists. Long deck names are truncated to one line.
 - **Load / Resume**: loading a deck from the library restores saved progress automatically — no prompt. The session resumes at the exact card and score where it was last saved.
+- **Mix Decks**: select two or more decks via checkboxes in the Decks tab. A **"Mix Selected (N decks · M cards)"** button appears in the footer. Clicking it shuffles all selected cards together, opens a name prompt pre-filled with the source deck names and a `[Mixed]` tag, saves the combined deck to the backend, and starts a new session.
 
 **Flashcard Progress (Auto-save)**
 - Progress is saved automatically on every card advance (no manual button).
@@ -107,7 +111,18 @@ All saves are scoped to the logged-in user. Available via the **Library** button
 - `authUser` — `{ username }` or null.
 - `currentDeckId` — integer id of the currently-active saved deck, or null for local/uploaded decks.
 - `showLibrary`, `libraryTab`, `savedDecks`, `savedParagraphs`, `savedConversations` — Library modal state.
-- `showSavePrompt` — `null | 'deck' | 'paragraph' | 'conversation'`; controls which save flow is active.
+- `showSavePrompt` — `null | 'deck' | 'paragraph' | 'conversation' | 'mixed'`; controls which save flow is active.
+- `pendingMixedCards` — merged card array held while the `'mixed'` save prompt is open; cleared on save or cancel.
+
+### 3a.4 Session Result Screen
+
+After completing a deck the result screen shows stars, score, and time stats, then three action buttons:
+
+1. **Start Review Deck (N)** — visible only when wrong/missed cards exist. Immediately starts a new session with those cards only.
+2. **Select Custom Words** — opens `AllWordsModal`: a scrollable list of every card in the deck with colour-coded status badges (green = correct, red = wrong, yellow = missed, grey = unvisited), per-card eye toggle, copy button, and a checkbox. Footer has **Select All / Deselect All** and **Start Custom Review (N)** (disabled when 0 selected). Selecting and confirming starts a session with exactly those cards.
+3. **Restart Full Deck** — restarts with the complete original deck.
+
+`selectedWordIndices` (Set) is reset automatically by `resetSession` on every new session start.
 
 ## 3b. Offline Mode
 

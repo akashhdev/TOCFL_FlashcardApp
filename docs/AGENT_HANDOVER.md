@@ -108,6 +108,9 @@ Security note:
 Flashcards (frontend state):
 - cards, currentIndex, cardStatuses, score, timerKey, isBonusWindow
 - currentDeckId: id of the currently-loaded saved deck (null if using default/uploaded deck not yet saved)
+- showAllWords: boolean — controls AllWordsModal visibility on result screen
+- selectedWordIndices: Set of card indices chosen in AllWordsModal for custom review
+- pendingMixedCards: array of merged cards held while the mixed-deck name prompt is open
 
 Paragraph mode:
 - paragraphConfig
@@ -170,6 +173,10 @@ Before handing back:
 13. Upload flashcard file via Library → deck appears in library list and loads into flashcard view.
 14. Save to Cloud in paragraph/conversation practice → Library → load restores the content.
 15. Logout clears auth; app returns to login screen.
+16. Library → Decks tab: long deck names are truncated to one line with "…".
+17. Library → Decks tab: select 2+ decks via checkboxes → "Mix Selected" button appears showing total card count → click → name prompt pre-filled with "[Mixed]" tag → save → new mixed session starts.
+18. Result screen: no word list visible; three buttons shown — "Start Review Deck" (only if mistakes exist), "Select Custom Words", "Restart Full Deck".
+19. "Select Custom Words" → AllWordsModal opens → all cards listed with status badges → checkboxes work → "Start Custom Review (N)" starts session with only selected cards.
 
 ## 10. Git Workflow Notes
 
@@ -198,6 +205,9 @@ If rebase conflict occurs:
 - `saveProgressSilent` depends on `currentDeckId` being set — if it's null (no saved deck), progress is never written. Always ensure `currentDeckId` is set before expecting auto-save to work.
 - The Online/Offline toggle is inside the Settings modal, not the header. Do not add a header badge for it.
 - The upload button is inside the Library modal footer only — not in the header. Triggering `fileInputRef.current.click()` from the Library footer is the sole upload entry point.
+- Mixed-deck flow: `showSavePrompt === 'mixed'` must be rendered in EVERY view that also renders `{showLibrary && <LibraryModal />}` — the Library can be opened from any mode and the save prompt appears on top of it. If you add a new view, add both.
+- `AllWordsModal` uses `selectedWordIndices` (Set) from App scope. Reset it in `resetSession` — already done, but don't remove that reset.
+- `LibraryModal` is now a function component with local state (`selectedDeckIds`) — it must remain a function body (not an implicit arrow return) so hooks work.
 
 ## 12. Quick Orientation for Next Agent
 
