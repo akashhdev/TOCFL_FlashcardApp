@@ -361,6 +361,7 @@ export default function App() {
   // API key sources: user-entered key (localStorage) overrides env key.
   const [customKey, setCustomKey] = useState(() => localStorage.getItem('gemini_key') || "");
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTestStatus, setSettingsTestStatus] = useState(null);
   const [isOfflineMode, setIsOfflineMode] = useState(() => localStorage.getItem('tocfl_mode') === 'offline');
 
   // Auth State
@@ -1379,7 +1380,10 @@ export default function App() {
     utterance.volume = volumeControl.voice;
 
     const voices = window.speechSynthesis.getVoices();
+    // Strictly prefer zh-TW (Traditional Chinese) voices; only fall back to other zh if none found.
+    const zhTWVoices = voices.filter((voice) => /^zh[-_]tw/i.test(voice.lang));
     const zhVoices = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('zh'));
+    const candidateVoices = zhTWVoices.length > 0 ? zhTWVoices : zhVoices;
 
     if (speaker && !speakerVoicePreferenceRef.current[speaker]) {
       const existingCount = Object.keys(speakerVoicePreferenceRef.current).length;
@@ -1392,13 +1396,13 @@ export default function App() {
 
     let preferredVoice = null;
     if (preference === 'female') {
-      preferredVoice = zhVoices.find((voice) => femaleVoiceRegex.test(voice.name));
+      preferredVoice = candidateVoices.find((voice) => femaleVoiceRegex.test(voice.name));
     }
     if (!preferredVoice && preference === 'male') {
-      preferredVoice = zhVoices.find((voice) => maleVoiceRegex.test(voice.name));
+      preferredVoice = candidateVoices.find((voice) => maleVoiceRegex.test(voice.name));
     }
-    if (!preferredVoice && zhVoices.length > 0) {
-      preferredVoice = zhVoices[0];
+    if (!preferredVoice && candidateVoices.length > 0) {
+      preferredVoice = candidateVoices[0];
     }
     if (preferredVoice) utterance.voice = preferredVoice;
 
@@ -1785,7 +1789,8 @@ export default function App() {
   // AllWordsModal: shows every card in the current deck with status badges and
   // individual checkboxes so the user can build a custom review deck.
   const AllWordsModal = () => {
-    const [revealedItems, setRevealedItems] = useState({});
+    const revealedItems = revealedReviewItems;
+    const setRevealedItems = setRevealedReviewItems;
     const allSelected = selectedWordIndices.size === cards.length;
 
     const toggleWord = (i) => {
@@ -2293,9 +2298,9 @@ export default function App() {
           </div>
           )}
         </div>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -2478,9 +2483,9 @@ export default function App() {
           </div>
           )}
         </div>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -2705,10 +2710,10 @@ export default function App() {
             </div>
           </div>
         </main>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showSavePrompt === 'conversation' && <SavePromptModal onSave={saveConversationToCloud} />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showSavePrompt === 'conversation' && SavePromptModal({ onSave: saveConversationToCloud })}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -2933,10 +2938,10 @@ export default function App() {
                 </div>
             </div>
         </main>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showSavePrompt === 'paragraph' && <SavePromptModal onSave={saveParagraphToCloud} />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showSavePrompt === 'paragraph' && SavePromptModal({ onSave: saveParagraphToCloud })}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -3004,11 +3009,11 @@ export default function App() {
             </button>
           </div>
         </div>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showAllWords && <AllWordsModal />}
-        {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showAllWords && AllWordsModal()}
+        {showSavePrompt === 'deck' && SavePromptModal({ onSave: saveDeckToCloud })}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -3016,7 +3021,8 @@ export default function App() {
   // --- Settings Modal Component ---
   // Includes API key management + lightweight connection validation.
   const SettingsModal = () => {
-    const [testStatus, setTestStatus] = useState(null);
+    const testStatus = settingsTestStatus;
+    const setTestStatus = setSettingsTestStatus;
 
     const testConnection = async () => {
       setTestStatus('loading');
@@ -3250,10 +3256,10 @@ export default function App() {
             )}
           </div>
         </div>
-        {showSettings && <SettingsModal />}
+        {showSettings && SettingsModal()}
         {showLibrary && <LibraryModal />}
-        {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
-        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+        {showSavePrompt === 'deck' && SavePromptModal({ onSave: saveDeckToCloud })}
+        {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
       </div>
     );
   }
@@ -3513,10 +3519,10 @@ export default function App() {
           </div>
         </div>
       )}
-      {showSettings && <SettingsModal />}
+      {showSettings && SettingsModal()}
       {showLibrary && <LibraryModal />}
-      {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
-      {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+      {showSavePrompt === 'deck' && SavePromptModal({ onSave: saveDeckToCloud })}
+      {showSavePrompt === 'mixed' && SavePromptModal({ onSave: saveMixedDeckToCloud })}
 
       <style>{`
         .perspective-1000 { perspective: 1000px; }
