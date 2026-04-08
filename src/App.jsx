@@ -65,24 +65,13 @@ const INITIAL_DECK = [
   { id: 3, char: "點心", pinyin: "diǎn xīn", meaning: "snack/dessert" },
   { id: 4, char: "豬肉", pinyin: "zhū ròu", meaning: "pork" },
   { id: 5, char: "菜", pinyin: "cài", meaning: "vegetable / dish" },
-  { id: 6, char: "飲料", pinyin: "yǐn liào", meaning: "beverage" },
-  { id: 7, char: "果汁", pinyin: "guǒ zhī", meaning: "juice" },
-  { id: 8, char: "紙", pinyin: "zhǐ", meaning: "paper" },
-  { id: 9, char: "桌子", pinyin: "zhuō zi", meaning: "table" },
-  { id: 10, char: "筆", pinyin: "bǐ", meaning: "pen" },
-  { id: 11, char: "帽子", pinyin: "mào zi", meaning: "hat" },
-  { id: 12, char: "裙子", pinyin: "qún zi", meaning: "skirt" },
-  { id: 13, char: "行李", pinyin: "xíng lǐ", meaning: "luggage" },
-  { id: 14, char: "花", pinyin: "huā", meaning: "flower" },
-  { id: 15, char: "樹", pinyin: "shù", meaning: "tree" },
-  { id: 16, char: "作業 / 功課", pinyin: "zuò yè / gōng kè", meaning: "homework" },
-  { id: 17, char: "球", pinyin: "qiú", meaning: "ball" },
-  { id: 18, char: "路口", pinyin: "lù kǒu", meaning: "intersection/crossing" },
-  { id: 19, char: "旅館", pinyin: "lǚ guǎn", meaning: "hotel" },
-  { id: 20, char: "百貨公司", pinyin: "bǎi huò gōng sī", meaning: "department store" }
 ];
 
 // --- Audio Engine (Singleton) ---
+// volumeControl is a mutable object so audio callbacks always read the latest values
+// without needing React closure updates.
+const volumeControl = { sfx: 1, voice: 1 };
+
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 const SoundFX = {
   playTone: (freq, type, duration, volume = 0.1) => {
@@ -91,7 +80,7 @@ const SoundFX = {
     const gain = audioCtx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-    gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+    gain.gain.setValueAtTime(volume * volumeControl.sfx, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
@@ -340,6 +329,9 @@ export default function App() {
   const [appMode, setAppMode] = useState('flashcards');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [sfxVolume, setSfxVolume] = useState(() => parseFloat(localStorage.getItem('tocfl_sfx_vol') ?? '1'));
+  const [voiceVolume, setVoiceVolume] = useState(() => parseFloat(localStorage.getItem('tocfl_voice_vol') ?? '1'));
+  const [currentDeckName, setCurrentDeckName] = useState('');
   
   // Flashcard Session State
   const [cards, setCards] = useState(INITIAL_DECK);
@@ -436,7 +428,12 @@ export default function App() {
   // Mixed deck state: holds merged cards while save-name prompt is open.
   const [pendingMixedCards, setPendingMixedCards] = useState(null);
 
+  // Flashcard setup state
+  const [flashcardSetupText, setFlashcardSetupText] = useState('');
+  const [flashcardSetupError, setFlashcardSetupError] = useState('');
+
   const fileInputRef = useRef(null);
+  const chatScrollRef = useRef(null);
   const currentCard = cards[currentIndex] || {};
   const speakerVoicePreferenceRef = useRef({});
 
@@ -605,6 +602,7 @@ export default function App() {
     setCards(deckCards);
     resetSession(deckCards);
     setCurrentDeckId(deck.id);
+    setCurrentDeckName(deck.name);
     setShowLibrary(false);
     setAppMode('flashcards');
 
@@ -633,6 +631,7 @@ export default function App() {
     try {
       const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards });
       setCurrentDeckId(data.id);
+      setCurrentDeckName(saveName.trim());
       setShowSavePrompt(null);
       setSaveName('');
       if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
@@ -660,6 +659,7 @@ export default function App() {
     try {
       const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards: mergedCards });
       setCurrentDeckId(data.id);
+      setCurrentDeckName(saveName.trim());
       setShowSavePrompt(null);
       setSaveName('');
       setPendingMixedCards(null);
@@ -732,18 +732,52 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleUnload);
   }, [saveProgressSilent]);
 
+  // Focus the chat scroll container when the chat opens so arrow keys scroll it directly.
+  useEffect(() => {
+    if (showChat && chatScrollRef.current) {
+      chatScrollRef.current.focus();
+    }
+  }, [showChat]);
+
+  // Keep module-level volumeControl in sync with React state and persist to localStorage.
+  useEffect(() => {
+    volumeControl.sfx = sfxVolume;
+    volumeControl.voice = voiceVolume;
+    localStorage.setItem('tocfl_sfx_vol', sfxVolume);
+    localStorage.setItem('tocfl_voice_vol', voiceVolume);
+  }, [sfxVolume, voiceVolume]);
+
   // --- Keyboard Shortcuts ---
   // Scope is primarily flashcard mode to avoid mode-crossing key collisions.
+  const CHAT_QUICK_PROMPTS = ["Explain grammar usage", "Historical context & breakdown", "Example sentences", "Is this formal?"];
+
   const handleKeyDown = useCallback((e) => {
+    // Don't fire shortcuts when focus is inside a text input or textarea.
+    const tag = e.target?.tagName;
+    const isTyping = tag === 'INPUT' || tag === 'TEXTAREA' || e.target?.isContentEditable;
+
     if (showChat || showSettings) {
-       if (e.key === 'Escape') {
-         setShowChat(false);
-         setShowSettings(false);
-       }
-       return;
+      // CapsLock or Escape closes the open modal.
+      if (e.key === 'Escape' || e.key === 'CapsLock') {
+        e.preventDefault();
+        setShowChat(false);
+        setShowSettings(false);
+        return;
+      }
+      // 1-4 fire quick prompts when chat is open, nothing typed yet, and not in the input.
+      if (showChat && !isTyping && chatMessages.length === 0) {
+        const idx = ['1', '2', '3', '4'].indexOf(e.key);
+        if (idx !== -1) {
+          e.preventDefault();
+          handleChat(CHAT_QUICK_PROMPTS[idx]);
+        }
+      }
+      return;
     }
 
-    if (e.key === 'Alt' || e.key === 'CapsLock') {
+    if (isTyping) return;
+
+    if (e.key === 'Alt') {
       e.preventDefault();
       handleTTS(currentCard.char);
       return;
@@ -754,14 +788,23 @@ export default function App() {
       if (e.key === 'ArrowLeft') prevCard();
       if (e.key === 'ArrowUp') setIsFlipped(prev => !prev);
       if (e.key === 'ArrowDown') setIsFlipped(false);
-      
+
+      if (e.key === ' ') {
+        e.preventDefault();
+        handleTTS(currentCard.char);
+      }
       if (e.key === 'Enter') {
         if (isFlipped) markCard('correct');
       }
       if (e.key === 'Escape') {
         if (isFlipped) markCard('wrong');
       }
-      
+
+      if (e.key === 'CapsLock') {
+        if (isOfflineMode) return;
+        e.preventDefault();
+        setShowChat(true);
+      }
       if (e.key === 'Tab') {
         if (isOfflineMode) return;
         e.preventDefault();
@@ -773,7 +816,7 @@ export default function App() {
         generateSmartSentence();
       }
     }
-  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings, isOfflineMode]);
+  }, [appMode, isFinished, isFlipped, currentCard, showChat, showSettings, isOfflineMode, chatMessages]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -893,9 +936,17 @@ export default function App() {
     resetTimer();
   };
 
-  const shuffleDeck = () => {
+  const shuffleDeck = async () => {
     const shuffled = [...cards].sort(() => Math.random() - 0.5);
     resetSession(shuffled);
+    // Overwrite the saved deck order so resumed sessions use the shuffled order.
+    if (currentDeckId && authToken) {
+      try {
+        await callAPI(`/api/decks/${currentDeckId}`, 'PUT', { cards: shuffled });
+      } catch (e) {
+        console.error('Failed to persist shuffled deck order:', e);
+      }
+    }
   };
 
   // --- Copy Helper ---
@@ -1077,6 +1128,7 @@ export default function App() {
     const saveDeckAndRefresh = async (deck) => {
       setCards(deck);
       resetSession(deck);
+      setCurrentDeckName(deckName);
       setAppMode('flashcards');
       if (authToken) {
         try {
@@ -1154,6 +1206,7 @@ export default function App() {
 
     const blob = pcmToWav(audioData.data);
     const audio = new Audio(URL.createObjectURL(blob));
+    audio.volume = volumeControl.voice;
     await audio.play();
   };
 
@@ -1323,6 +1376,7 @@ export default function App() {
     utterance.lang = 'zh-TW';
     utterance.rate = 0.9;
     utterance.pitch = 1;
+    utterance.volume = volumeControl.voice;
 
     const voices = window.speechSynthesis.getVoices();
     const zhVoices = voices.filter((voice) => voice.lang?.toLowerCase().startsWith('zh'));
@@ -1401,6 +1455,7 @@ export default function App() {
     const playChunk = (chunk) => new Promise((resolve, reject) => {
       const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-TW&q=${encodeURIComponent(chunk)}`;
       const audio = new Audio(url);
+      audio.volume = volumeControl.voice;
       const timeoutId = setTimeout(() => {
         audio.pause();
         reject(new Error('Google TTS request timeout'));
@@ -1596,9 +1651,9 @@ export default function App() {
       </div>
 
       <div className={`flex p-1 rounded-xl backdrop-blur-md ${isDarkMode ? 'bg-slate-800/50' : 'bg-slate-200/50'}`}>
-        <button 
-          onClick={() => setAppMode('flashcards')} 
-          className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${appMode === 'flashcards' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
+        <button
+          onClick={() => setAppMode('flashcard-setup')}
+          className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${(appMode === 'flashcards' || appMode === 'flashcard-setup') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
         >
           Flashcards
         </button>
@@ -1912,6 +1967,25 @@ export default function App() {
                         <button onClick={() => loadDeckFromLibrary(deck)} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition-all">
                           {deck.has_progress === 1 ? 'Resume' : 'Load'}
                         </button>
+                        <button
+                          onClick={() => {
+                            const deckCards = JSON.parse(deck.cards_json || '[]');
+                            const csv = deckCards.map(c => [c.char, c.pinyin, c.meaning].join(',')).join('\n');
+                            const blob = new Blob([csv], { type: 'text/plain' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `${deck.name}.txt`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                          }}
+                          className="p-2 bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 hover:text-white rounded-xl transition-all"
+                          title="Download as .txt"
+                        >
+                          <Download size={16}/>
+                        </button>
                         <button onClick={async () => { await callAPI(`/api/decks/${deck.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl transition-all">
                           <X size={16}/>
                         </button>
@@ -1939,6 +2013,30 @@ export default function App() {
                         }}
                         className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
                       >Load</button>
+                      <button
+                        onClick={async () => {
+                          const full = await callAPI(`/api/paragraphs/${p.id}`);
+                          const snapshot = {
+                            app: 'TOCFL Prep', type: 'paragraph-snapshot', version: 1,
+                            savedAt: new Date().toISOString(),
+                            paragraphConfig: JSON.parse(full.paragraph_config),
+                            paragraphData: JSON.parse(full.paragraph_data)
+                          };
+                          const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${p.name}.json`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="p-2 bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 hover:text-white rounded-xl transition-all"
+                        title="Download as .json"
+                      >
+                        <Download size={16}/>
+                      </button>
                       <button onClick={async () => { await callAPI(`/api/paragraphs/${p.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
                         <X size={16}/>
                       </button>
@@ -1965,6 +2063,30 @@ export default function App() {
                         }}
                         className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold"
                       >Load</button>
+                      <button
+                        onClick={async () => {
+                          const full = await callAPI(`/api/conversations/${c.id}`);
+                          const snapshot = {
+                            app: 'TOCFL Prep', type: 'conversation-snapshot', version: 1,
+                            savedAt: new Date().toISOString(),
+                            conversationConfig: JSON.parse(full.conversation_config),
+                            conversationData: JSON.parse(full.conversation_data)
+                          };
+                          const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${c.name}.json`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="p-2 bg-slate-500/10 hover:bg-slate-500/20 text-slate-400 hover:text-white rounded-xl transition-all"
+                        title="Download as .json"
+                      >
+                        <Download size={16}/>
+                      </button>
                       <button onClick={async () => { await callAPI(`/api/conversations/${c.id}`, 'DELETE'); loadLibrary(); }} className="p-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 rounded-xl">
                         <X size={16}/>
                       </button>
@@ -2159,6 +2281,15 @@ export default function App() {
             <button onClick={startParagraphGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
               Generate Paragraph
             </button>
+
+            {authToken && (
+              <button
+                onClick={() => { loadLibrary(); setLibraryTab('paragraphs'); setShowLibrary(true); }}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+              >
+                <Library size={18} /> Load From Library
+              </button>
+            )}
           </div>
           )}
         </div>
@@ -2335,6 +2466,15 @@ export default function App() {
             <button onClick={startConversationGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
               Generate Conversation
             </button>
+
+            {authToken && (
+              <button
+                onClick={() => { loadLibrary(); setLibraryTab('conversations'); setShowLibrary(true); }}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+              >
+                <Library size={18} /> Load From Library
+              </button>
+            )}
           </div>
           )}
         </div>
@@ -2966,6 +3106,27 @@ export default function App() {
               </button>
             </div>
 
+            <div className="space-y-3">
+              {[
+                { label: 'Voice Volume', value: voiceVolume, set: setVoiceVolume, icon: <Volume2 size={14}/> },
+                { label: 'SFX Volume',   value: sfxVolume,   set: setSfxVolume,   icon: <Zap size={14}/> },
+              ].map(({ label, value, set, icon }) => (
+                <div key={label}>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold uppercase tracking-widest opacity-60 flex items-center gap-1.5">{icon}{label}</label>
+                    <span className="text-xs font-bold opacity-50">{Math.round(value * 100)}%</span>
+                  </div>
+                  <input
+                    type="range" min="0" max="1" step="0.05"
+                    value={value}
+                    onChange={e => set(parseFloat(e.target.value))}
+                    className="w-full h-2 rounded-lg appearance-none cursor-pointer"
+                    style={{ background: `linear-gradient(to right, #6366f1 0%, #6366f1 ${value * 100}%, ${isDarkMode ? '#374151' : '#e2e8f0'} ${value * 100}%, ${isDarkMode ? '#374151' : '#e2e8f0'} 100%)` }}
+                  />
+                </div>
+              ))}
+            </div>
+
             <div>
               <label className="block text-xs font-bold uppercase tracking-widest opacity-60 mb-2">Gemini API Key</label>
               <div className={`flex items-center gap-2 p-3 rounded-xl border ${isDarkMode ? 'bg-slate-950 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
@@ -3003,6 +3164,99 @@ export default function App() {
       </div>
     );
   };
+
+  // --- Flashcard Setup View ---
+  if (appMode === 'flashcard-setup') {
+    const handleFlashcardSetupGenerate = () => {
+      setFlashcardSetupError('');
+      const lines = flashcardSetupText.split('\n').filter(l => l.trim());
+      const parsed = lines.map((line, idx) => {
+        const parts = line.split(',').map(p => p.trim());
+        if (parts.length < 1 || !parts[0]) return null;
+        return {
+          id: Date.now() + idx,
+          char: parts[0],
+          pinyin: parts[1] || '',
+          meaning: parts.slice(2).join(', ') || ''
+        };
+      }).filter(Boolean);
+
+      if (parsed.length === 0) {
+        setFlashcardSetupError('No valid cards found. Use the format: character, pinyin, meaning (one per line).');
+        return;
+      }
+
+      setCards(parsed);
+      resetSession(parsed);
+      setAppMode('flashcards');
+      setSaveName('');
+      setShowSavePrompt('deck');
+    };
+
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-6 ${themeClass}`}>
+        <Header />
+        <div className={`max-w-md w-full rounded-3xl p-8 shadow-2xl ${cardBg} border`}>
+          <h2 className="text-2xl font-black mb-8 flex items-center gap-2">
+            <BookOpen className="text-indigo-500" /> Flashcard Setup
+          </h2>
+
+          <div className="space-y-6">
+            <div>
+              <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Enter Flashcards</label>
+              <textarea
+                value={flashcardSetupText}
+                onChange={e => { setFlashcardSetupText(e.target.value); setFlashcardSetupError(''); }}
+                placeholder={`杯子, bēi zi, cup/glass\n麵包, miàn bāo, bread\n點心, diǎn xīn, snack/dessert\n\nFormat: character, pinyin, meaning\nOne card per line. Pinyin and meaning are optional.`}
+                rows={10}
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 font-mono resize-none ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-600' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400'}`}
+              />
+              {flashcardSetupError && (
+                <div className="mt-2 text-red-500 text-xs font-bold flex items-center gap-1">
+                  <AlertCircle size={14} /> {flashcardSetupError}
+                </div>
+              )}
+              {flashcardSetupText.trim() && !flashcardSetupError && (
+                <div className="mt-2 text-xs text-slate-500">
+                  {flashcardSetupText.split('\n').filter(l => l.trim()).length} line(s) entered
+                </div>
+              )}
+            </div>
+
+            <button
+              onClick={handleFlashcardSetupGenerate}
+              disabled={!flashcardSetupText.trim()}
+              className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all flex items-center justify-center gap-2"
+            >
+              <Sparkles size={18} /> Generate Flashcard Set
+            </button>
+
+            {authToken && (
+              <button
+                onClick={() => { loadLibrary(); setLibraryTab('decks'); setShowLibrary(true); }}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+              >
+                <Library size={18} /> Load From Library
+              </button>
+            )}
+
+            {cards.length > 0 && (
+              <button
+                onClick={() => setAppMode('flashcards')}
+                className={`w-full py-3 rounded-xl font-bold transition-all text-sm ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              >
+                Continue Current Session ({cards.length} cards)
+              </button>
+            )}
+          </div>
+        </div>
+        {showSettings && <SettingsModal />}
+        {showLibrary && <LibraryModal />}
+        {showSavePrompt === 'deck' && <SavePromptModal onSave={saveDeckToCloud} />}
+        {showSavePrompt === 'mixed' && <SavePromptModal onSave={saveMixedDeckToCloud} />}
+      </div>
+    );
+  }
 
   // --- Main Flashcard UI ---
   return (
@@ -3047,11 +3301,18 @@ export default function App() {
         )}
 
         {/* Timer Component */}
-        <TimerBar 
+        <TimerBar
           isActive={appMode === 'flashcards' && !isFinished && !isFlipped}
           onExpire={() => setIsBonusWindow(false)}
           resetKey={timerKey}
         />
+
+        {/* Deck Name */}
+        {currentDeckName && (
+          <div className="text-center mb-4 -mt-2">
+            <span className={`text-xs font-bold uppercase tracking-widest opacity-50`}>{currentDeckName}</span>
+          </div>
+        )}
 
         {/* The Card */}
         <div className="relative mb-8">
@@ -3201,23 +3462,41 @@ export default function App() {
               <button onClick={() => setShowChat(false)} className={`p-2 rounded-full transition-colors ${isDarkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}><X size={20}/></button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            <div ref={chatScrollRef} tabIndex={-1} className="flex-1 overflow-y-auto p-6 space-y-4 outline-none">
                {chatMessages.length === 0 && (
                  <div className="grid grid-cols-2 gap-2 mt-8">
-                   {["Explain grammar usage", "Historical context & breakdown", "Example sentences", "Is this formal?"].map(q => (
-                     <button key={q} onClick={() => handleChat(q)} className={`p-3 text-xs font-bold rounded-xl transition-colors text-left ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
+                   {CHAT_QUICK_PROMPTS.map((q, i) => (
+                     <button key={q} onClick={() => handleChat(q)} className={`p-3 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-2 ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
+                       <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{i + 1}</span>
                        {q}
                      </button>
                    ))}
                  </div>
                )}
-               {chatMessages.map((m, i) => (
-                 <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                   <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${m.role === 'user' ? 'bg-indigo-600 text-white' : isDarkMode ? 'bg-slate-800 text-slate-200' : 'bg-slate-100 text-slate-800'}`}>
-                     <FormattedText text={m.text} isUser={m.role === 'user'} />
+               {chatMessages.map((m, i) => {
+                 const isLastAi = m.role === 'ai' && i === chatMessages.length - 1;
+                 const lastUserText = chatMessages.slice(0, i).reverse().find(x => x.role === 'user')?.text;
+                 const followups = CHAT_QUICK_PROMPTS.filter(p => p !== lastUserText);
+                 return (
+                   <div key={i}>
+                     <div className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                       <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${m.role === 'user' ? 'bg-indigo-600 text-white' : isDarkMode ? 'bg-slate-800 text-slate-200' : 'bg-slate-100 text-slate-800'}`}>
+                         <FormattedText text={m.text} isUser={m.role === 'user'} />
+                       </div>
+                     </div>
+                     {isLastAi && !isChatting && (
+                       <div className="grid grid-cols-2 gap-1.5 mt-2">
+                         {followups.map((q, qi) => (
+                           <button key={q} onClick={() => handleChat(q)} className={`p-2 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-1.5 ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
+                             <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{qi + 1}</span>
+                             {q}
+                           </button>
+                         ))}
+                       </div>
+                     )}
                    </div>
-                 </div>
-               ))}
+                 );
+               })}
                {isChatting && <div className="flex gap-1 p-4"><span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"/></div>}
             </div>
 
