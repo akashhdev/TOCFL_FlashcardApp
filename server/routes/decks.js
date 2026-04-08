@@ -32,6 +32,19 @@ router.post('/', (req, res) => {
   res.json({ id: result.lastInsertRowid, name: name.trim() });
 });
 
+// PUT /api/decks/:id - update a deck's card order (e.g. after shuffle)
+router.put('/:id', (req, res) => {
+  const { cards } = req.body;
+  if (!Array.isArray(cards) || cards.length === 0) {
+    return res.status(400).json({ error: 'cards array required' });
+  }
+  const result = db.prepare(
+    'UPDATE flashcard_decks SET cards_json = ? WHERE id = ? AND user_id = ?'
+  ).run(JSON.stringify(cards), req.params.id, req.userId);
+  if (result.changes === 0) return res.status(404).json({ error: 'Deck not found' });
+  res.json({ ok: true });
+});
+
 // DELETE /api/decks/:id - delete a deck (cascades to progress)
 router.delete('/:id', (req, res) => {
   const result = db.prepare(

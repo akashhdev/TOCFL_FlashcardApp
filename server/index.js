@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
 // Initialize DB (runs schema DDL on startup)
 require('./db');
@@ -23,6 +24,15 @@ app.use('/api/conversations', require('./routes/conversations'));
 
 // Health check
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+// Serve built React frontend (production)
+const distPath = path.join(__dirname, '../dist');
+app.use(express.static(distPath));
+
+// SPA fallback — all non-API routes return index.html
+app.get('/{*path}', (_req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
