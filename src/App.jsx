@@ -384,6 +384,8 @@ export default function App() {
   // Save prompt state
   const [showSavePrompt, setShowSavePrompt] = useState(null); // null | 'deck' | 'paragraph' | 'conversation'
   const [saveName, setSaveName] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
 
   // Current saved deck id (links active session to DB for progress saving)
   const [currentDeckId, setCurrentDeckId] = useState(null);
@@ -628,7 +630,9 @@ export default function App() {
 
   // --- Cloud Save Functions ---
   const saveDeckToCloud = async () => {
-    if (!saveName.trim()) return;
+    if (!saveName.trim() || isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
     try {
       const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards });
       setCurrentDeckId(data.id);
@@ -651,12 +655,17 @@ export default function App() {
       }
     } catch (e) {
       console.error('Save deck failed:', e);
+      setSaveError(e.message || 'Save failed. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const saveMixedDeckToCloud = async () => {
-    if (!saveName.trim() || !pendingMixedCards) return;
+    if (!saveName.trim() || !pendingMixedCards || isSaving) return;
     const mergedCards = pendingMixedCards;
+    setIsSaving(true);
+    setSaveError(null);
     try {
       const data = await callAPI('/api/decks', 'POST', { name: saveName.trim(), cards: mergedCards });
       setCurrentDeckId(data.id);
@@ -676,11 +685,16 @@ export default function App() {
       } catch (e) { console.error('Initial progress save failed:', e); }
     } catch (e) {
       console.error('Save mixed deck failed:', e);
+      setSaveError(e.message || 'Save failed. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const saveParagraphToCloud = async () => {
-    if (!saveName.trim()) return;
+    if (!saveName.trim() || isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
     try {
       await callAPI('/api/paragraphs', 'POST', { name: saveName.trim(), paragraphConfig, paragraphData });
       setShowSavePrompt(null);
@@ -688,11 +702,16 @@ export default function App() {
       if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
     } catch (e) {
       console.error('Save paragraph failed:', e);
+      setSaveError(e.message || 'Save failed. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const saveConversationToCloud = async () => {
-    if (!saveName.trim()) return;
+    if (!saveName.trim() || isSaving) return;
+    setIsSaving(true);
+    setSaveError(null);
     try {
       await callAPI('/api/conversations', 'POST', { name: saveName.trim(), conversationConfig, conversationData });
       setShowSavePrompt(null);
@@ -700,6 +719,9 @@ export default function App() {
       if (soundEnabled) SoundFX.playTone(800, 'triangle', 0.15);
     } catch (e) {
       console.error('Save conversation failed:', e);
+      setSaveError(e.message || 'Save failed. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -1773,14 +1795,18 @@ export default function App() {
         <input
           autoFocus
           value={saveName}
-          onChange={e => setSaveName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && onSave()}
+          onChange={e => { setSaveName(e.target.value); setSaveError(null); }}
+          onKeyDown={e => e.key === 'Enter' && !isSaving && onSave()}
           placeholder="Enter a name..."
+          disabled={isSaving}
           className={`w-full px-4 py-3 rounded-xl border text-sm outline-none mb-4 focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200'}`}
         />
+        {saveError && <p className="text-red-500 text-xs mb-3">{saveError}</p>}
         <div className="flex gap-3">
-          <button onClick={() => { setShowSavePrompt(null); setSaveName(''); }} className={`flex-1 py-3 rounded-xl font-bold ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>Cancel</button>
-          <button onClick={onSave} disabled={!saveName.trim()} className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold">Save</button>
+          <button onClick={() => { setShowSavePrompt(null); setSaveName(''); setSaveError(null); }} disabled={isSaving} className={`flex-1 py-3 rounded-xl font-bold disabled:opacity-50 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>Cancel</button>
+          <button onClick={onSave} disabled={!saveName.trim() || isSaving} className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold">
+            {isSaving ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </div>
     </div>
