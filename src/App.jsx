@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
-  ChevronLeft, ChevronRight, RotateCcw, Sparkles, MessageCircle, Send, 
-  Loader2, X, Moon, Sun, Upload, Download, Volume2, VolumeX, 
+  ChevronLeft, ChevronRight, RotateCcw, Sparkles, MessageCircle, Send,
+  Loader2, X, Moon, Sun, Upload, Download, Volume2, VolumeX,
   Trophy, AlertCircle, Eye, EyeOff, RefreshCw, BrainCircuit,
   GraduationCap, Star, Smile, Frown, Meh, AlertTriangle, XCircle,
   BookOpen, CheckSquare, Shuffle, CheckCircle2, Copy, Clock, Settings, Key, Zap,
-  LogIn, LogOut, Library, Save, PlayCircle, User, Circle, ListChecks
+  LogIn, LogOut, Library, Save, PlayCircle, User, Circle, ListChecks, Smartphone
 } from 'lucide-react';
 
 /*
@@ -327,7 +327,7 @@ export default function App() {
   // Global UI State
   // `appMode` is the top-level route/state machine driver for the whole app.
   const [appMode, setAppMode] = useState('flashcards');
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [colorTheme, setColorTheme] = useState(() => localStorage.getItem('tocfl_theme') || 'dark');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [sfxVolume, setSfxVolume] = useState(() => parseFloat(localStorage.getItem('tocfl_sfx_vol') ?? '1'));
   const [voiceVolume, setVoiceVolume] = useState(() => parseFloat(localStorage.getItem('tocfl_voice_vol') ?? '1'));
@@ -439,6 +439,7 @@ export default function App() {
   const chatScrollRef = useRef(null);
   const currentCard = cards[currentIndex] || {};
   const speakerVoicePreferenceRef = useRef({});
+  const conversationAudioCacheRef = useRef({}); // turnIndex → blobUrl[]
 
   // Derived counters to avoid repeated O(n) scans during render.
   const statusStats = useMemo(() => {
@@ -1084,7 +1085,7 @@ export default function App() {
     return true;
   };
 
-  const applyConversationSnapshot = (payload) => {
+  const applyConversationSnapshot = async (payload) => {
     const snapshotConfig = payload?.conversationConfig || {};
     const snapshotData = payload?.conversationData || {};
     if (!Array.isArray(snapshotData.conversation) || snapshotData.conversation.length === 0) return false;
@@ -1119,6 +1120,14 @@ export default function App() {
     setRevealedConversationTurns({});
     setPlayingTurnIndex(null);
     speakerVoicePreferenceRef.current = {};
+
+    // Show loading screen while pre-caching audio.
+    conversationAudioCacheRef.current = {};
+    setConversationLoadingStatus(`Preparing audio (0/${normalizedConversation.length})…`);
+    setAppMode('conversation-loading');
+    await precacheConversationAudio(normalizedConversation, (done, total) => {
+      setConversationLoadingStatus(`Preparing audio (${done}/${total})…`);
+    });
     setAppMode('conversation-practice');
     return true;
   };
@@ -1195,7 +1204,7 @@ export default function App() {
         const jsonText = await file.text();
         const parsed = JSON.parse(jsonText);
         const loadedParagraph = parsed?.type === 'paragraph-snapshot' && applyParagraphSnapshot(parsed);
-        const loadedConversation = !loadedParagraph && parsed?.type === 'conversation-snapshot' && applyConversationSnapshot(parsed);
+        const loadedConversation = !loadedParagraph && parsed?.type === 'conversation-snapshot' && await applyConversationSnapshot(parsed);
         const loadedDeck = !loadedParagraph && !loadedConversation && await applyDeckFromJson(parsed);
         if (loadedParagraph || loadedConversation || loadedDeck) return;
       } catch (err) {
@@ -1323,16 +1332,19 @@ export default function App() {
     }
 
     const lengthMap = {
-      'short': '50-80 words',
-      'medium': '80-120 words', 
-      'long': '120-160 words'
+      'short': '80-120 words',
+      'medium': '350-400 words',
+      'long': '650-700 words'
     };
+
+    const questionCountMap = { 'short': 3, 'medium': 5, 'long': 10 };
+    const questionCount = questionCountMap[paragraphConfig.length];
 
     const prompt = `task: TOCFL Band ${paragraphConfig.level} reading paragraph in Traditional Chinese
   topic: daily-life narrative
   length: ${lengthMap[paragraphConfig.length]}
   ${vocabContext ? `${vocabContext}\n` : ''}output: ${paragraphConfig.includeQuestions
-      ? 'json {paragraph, questions[3-5]{question, question_english, options[3], options_english[3], correct_answer, explanation}}'
+      ? `json {paragraph, questions[exactly ${questionCount}]{question, question_english, options[3], options_english[3], correct_answer, explanation}}`
       : 'text paragraph only'}`;
     
     try {
@@ -1522,12 +1534,67 @@ export default function App() {
   };
 
   // Plays one transcript turn and updates inline UI spinner state.
+  // Splits text into TTS-safe chunks (shared by playGoogleTranslateTTS + precaching).
+  const splitTTSChunks = (text) =>
+    text.split(/(?<=[。！？!?])/)
+      .map(c => c.trim()).filter(Boolean)
+      .flatMap(chunk => {
+        if (chunk.length <= 110) return [chunk];
+        const parts = [];
+        let current = '';
+        for (const token of chunk.split(/([，,；;])/)) {
+          if ((current + token).length > 110 && current) { parts.push(current.trim()); current = token; }
+          else { current += token; }
+        }
+        if (current.trim()) parts.push(current.trim());
+        return parts;
+      });
+
+  // Pre-fetches every conversation turn's Google TTS audio as blob URLs so
+  // playback is instant when the user clicks play. Falls back gracefully.
+  const precacheConversationAudio = async (turns, onProgress) => {
+    const cache = {};
+    for (let i = 0; i < turns.length; i++) {
+      if (onProgress) onProgress(i + 1, turns.length);
+      const chunks = splitTTSChunks(turns[i].text);
+      const blobUrls = await Promise.all(chunks.map(async (chunk) => {
+        const url = `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-TW&q=${encodeURIComponent(chunk)}`;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          return URL.createObjectURL(blob);
+        } catch {
+          return null; // network/CORS miss → fall back to live URL on play
+        }
+      }));
+      cache[i] = blobUrls;
+    }
+    conversationAudioCacheRef.current = cache;
+  };
+
   const playConversationTurn = async (turn, index) => {
     if (!turn?.text) return;
     setPlayingTurnIndex(index);
     try {
+      const cachedUrls = conversationAudioCacheRef.current[index];
+      if (cachedUrls?.length) {
+        // Play pre-fetched blobs sequentially for instant, lag-free playback.
+        for (const blobUrl of cachedUrls) {
+          if (!blobUrl) continue;
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((resolve, reject) => {
+            const audio = new Audio(blobUrl);
+            audio.volume = volumeControl.voice;
+            audio.onended = resolve;
+            audio.onerror = () => reject(new Error('cached audio playback failed'));
+            audio.play().catch(reject);
+          });
+        }
+        return;
+      }
+      // Cache miss — fall back to live TTS.
       try {
-        // Prefer browser speech here so different speakers can use different voices.
         await playBrowserSpeechSynthesis(turn.text, turn.speaker);
       } catch {
         await playGoogleTranslateTTS(turn.text, {
@@ -1617,11 +1684,17 @@ export default function App() {
         throw new Error(`Generated fewer than ${minQuestionCount} questions`);
       }
 
+      const conversationTurns = parsed.conversation;
       setConversationData({
         title: parsed.title || 'Listening Conversation',
-        conversation: parsed.conversation,
+        conversation: conversationTurns,
         questions: parsed.questions || [],
         words: cards.map(c => c.char)
+      });
+      conversationAudioCacheRef.current = {};
+      setConversationLoadingStatus(`Preparing audio (0/${conversationTurns.length})…`);
+      await precacheConversationAudio(conversationTurns, (done, total) => {
+        setConversationLoadingStatus(`Preparing audio (${done}/${total})…`);
       });
       setAppMode('conversation-practice');
     } catch (e) {
@@ -1638,18 +1711,7 @@ export default function App() {
     const turns = conversationData?.conversation || [];
     if (turns.length === 0) return;
 
-    setConversationVisibleTurns(0);
-    const id = setInterval(() => {
-      setConversationVisibleTurns(prev => {
-        if (prev >= turns.length) {
-          clearInterval(id);
-          return prev;
-        }
-        return prev + 1;
-      });
-    }, 1500);
-
-    return () => clearInterval(id);
+    setConversationVisibleTurns(turns.length);
   }, [appMode, conversationData]);
 
   // --- Helpers ---
@@ -1660,10 +1722,19 @@ export default function App() {
   };
 
   // --- Theme Helpers ---
-  const themeClass = isDarkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900';
-  const cardBg = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
-  const iconBtnClass = `p-2.5 rounded-xl transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700' : 'bg-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-300'}`;
-  const navBtnClass = `p-4 rounded-2xl transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`;
+  const isDarkMode = colorTheme !== 'light';
+  const isOled = colorTheme === 'oled';
+  const cycleTheme = () => {
+    const next = colorTheme === 'light' ? 'dark' : colorTheme === 'dark' ? 'oled' : 'light';
+    localStorage.setItem('tocfl_theme', next);
+    setColorTheme(next);
+  };
+
+  const themeClass = isOled ? 'bg-black text-white' : isDarkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900';
+  // OLED: bg-black + border utility included so ${cardBg} alone still shows a border
+  const cardBg = isOled ? 'bg-black border border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+  const iconBtnClass = `p-2.5 rounded-xl transition-colors ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white hover:border-zinc-600' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700' : 'bg-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-300'}`;
+  const navBtnClass = `p-4 rounded-2xl transition-all ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:bg-indigo-600 hover:text-white hover:border-indigo-600' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`;
 
   // --- Components ---
   // Header is shared across all modes and acts as global mode switcher.
@@ -1676,7 +1747,7 @@ export default function App() {
         <span className="font-black text-xl tracking-tight hidden sm:block">TOCFL Prep</span>
       </div>
 
-      <div className={`flex p-1 rounded-xl backdrop-blur-md ${isDarkMode ? 'bg-slate-800/50' : 'bg-slate-200/50'}`}>
+      <div className={`flex p-1 rounded-xl backdrop-blur-md ${isOled ? 'bg-black border border-zinc-800' : isDarkMode ? 'bg-slate-800/50' : 'bg-slate-200/50'}`}>
         <button
           onClick={() => setAppMode('flashcard-setup')}
           className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${(appMode === 'flashcards' || appMode === 'flashcard-setup') ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-500'}`}
@@ -1724,7 +1795,7 @@ export default function App() {
         </div>
 
         <div className={`w-full max-w-sm p-8 rounded-3xl shadow-2xl border ${cardBg}`}>
-          <div className={`flex p-1 rounded-xl mb-6 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+          <div className={`flex p-1 rounded-xl mb-6 ${isOled ? 'bg-zinc-950 border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
             {['login', 'register'].map(mode => (
               <button
                 key={mode}
@@ -1744,7 +1815,7 @@ export default function App() {
                 onChange={e => setAuthUsername(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
                 placeholder="your_username"
-                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isOled ? 'bg-black border-zinc-800 text-white' : isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
               />
             </div>
             <div>
@@ -1755,7 +1826,7 @@ export default function App() {
                 onChange={e => setAuthPassword(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && (authMode === 'login' ? handleLogin() : handleRegister())}
                 placeholder="••••••••"
-                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 ${isOled ? 'bg-black border-zinc-800 text-white' : isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
               />
             </div>
 
@@ -1776,10 +1847,10 @@ export default function App() {
           </div>
 
           <button
-            onClick={() => setIsDarkMode(p => !p)}
-            className={`mt-6 w-full py-2 rounded-xl text-xs font-bold ${isDarkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}
+            onClick={cycleTheme}
+            className={`mt-6 w-full py-2 rounded-xl text-xs font-bold ${isOled ? 'text-zinc-600 hover:text-zinc-400' : isDarkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}
           >
-            {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            {colorTheme === 'light' ? 'Switch to Dark Mode' : colorTheme === 'dark' ? 'Switch to OLED Mode' : 'Switch to Light Mode'}
           </button>
         </div>
       </div>
@@ -1799,11 +1870,11 @@ export default function App() {
           onKeyDown={e => e.key === 'Enter' && !isSaving && onSave()}
           placeholder="Enter a name..."
           disabled={isSaving}
-          className={`w-full px-4 py-3 rounded-xl border text-sm outline-none mb-4 focus:border-indigo-500 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200'}`}
+          className={`w-full px-4 py-3 rounded-xl border text-sm outline-none mb-4 focus:border-indigo-500 ${isOled ? 'bg-black border-zinc-800 text-white' : isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-200'}`}
         />
         {saveError && <p className="text-red-500 text-xs mb-3">{saveError}</p>}
         <div className="flex gap-3">
-          <button onClick={() => { setShowSavePrompt(null); setSaveName(''); setSaveError(null); }} disabled={isSaving} className={`flex-1 py-3 rounded-xl font-bold disabled:opacity-50 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>Cancel</button>
+          <button onClick={() => { setShowSavePrompt(null); setSaveName(''); setSaveError(null); }} disabled={isSaving} className={`flex-1 py-3 rounded-xl font-bold disabled:opacity-50 ${isOled ? 'bg-zinc-950 border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>Cancel</button>
           <button onClick={onSave} disabled={!saveName.trim() || isSaving} className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl font-bold">
             {isSaving ? 'Saving…' : 'Save'}
           </button>
@@ -1848,7 +1919,7 @@ export default function App() {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
         <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
-          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <div className={`p-5 border-b flex justify-between items-center ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
             <h3 className="font-black text-lg flex items-center gap-2"><ListChecks className="text-indigo-500" size={20}/> All Words ({cards.length})</h3>
             <button onClick={() => setShowAllWords(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
           </div>
@@ -1861,7 +1932,7 @@ export default function App() {
                 <div
                   key={i}
                   onClick={() => toggleWord(i)}
-                  className={`p-4 rounded-2xl border flex items-center justify-between cursor-pointer transition-colors ${isSelected ? (isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
+                  className={`p-4 rounded-2xl border flex items-center justify-between cursor-pointer transition-colors ${isSelected ? (isOled ? 'bg-indigo-900/20 border-indigo-500/50' : isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
                 >
                   <div className="flex items-center gap-3">
                     <input
@@ -1878,18 +1949,18 @@ export default function App() {
                     {revealedItems[i] ? (
                       <div className="text-right">
                         <div className="text-xs font-bold text-indigo-500">{card.pinyin}</div>
-                        <div className={`text-xs max-w-[110px] truncate ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{card.meaning}</div>
+                        <div className={`text-xs max-w-[110px] truncate ${isOled ? 'text-zinc-400' : isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{card.meaning}</div>
                       </div>
                     ) : (
                       <span className="text-xs text-slate-400 italic">Hidden</span>
                     )}
                     <button
                       onClick={e => { e.stopPropagation(); copyToClipboard(card.char); }}
-                      className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
+                      className={`p-2 rounded-lg transition-colors ${isOled ? 'bg-black border border-zinc-800 text-zinc-400 hover:text-white' : isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
                     ><Copy size={16}/></button>
                     <button
                       onClick={e => { e.stopPropagation(); setRevealedItems(p => ({...p, [i]: !p[i]})); }}
-                      className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
+                      className={`p-2 rounded-lg transition-colors ${isOled ? 'bg-black border border-zinc-800 text-zinc-400 hover:text-white' : isDarkMode ? 'bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-200 text-slate-500 hover:text-indigo-600'}`}
                     >{revealedItems[i] ? <EyeOff size={16}/> : <Eye size={16}/>}</button>
                   </div>
                 </div>
@@ -1897,10 +1968,10 @@ export default function App() {
             })}
           </div>
 
-          <div className={`p-4 border-t space-y-2 ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <div className={`p-4 border-t space-y-2 ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
             <button
               onClick={toggleAll}
-              className={`w-full py-2.5 rounded-xl text-sm font-bold transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              className={`w-full py-2.5 rounded-xl text-sm font-bold transition-colors ${isOled ? 'bg-zinc-950 border border-zinc-800 text-zinc-300 hover:bg-zinc-900' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
             >
               {allSelected ? 'Deselect All' : 'Select All'}
             </button>
@@ -1949,12 +2020,12 @@ export default function App() {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
         <div className={`w-full max-w-lg h-[80vh] rounded-3xl flex flex-col overflow-hidden shadow-2xl border ${cardBg}`}>
-          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <div className={`p-5 border-b flex justify-between items-center ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
             <h3 className="font-black text-lg flex items-center gap-2"><Library className="text-indigo-500" size={20}/> My Library</h3>
             <button onClick={() => setShowLibrary(false)} className="p-2 rounded-full hover:bg-slate-500/10"><X size={20}/></button>
           </div>
 
-          <div className={`flex border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
+          <div className={`flex border-b ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
             {['decks', 'paragraphs', 'conversations'].map(tab => (
               <button
                 key={tab}
@@ -1977,7 +2048,7 @@ export default function App() {
                   return (
                     <div
                       key={deck.id}
-                      className={`p-4 rounded-2xl border flex items-center gap-3 transition-colors ${isSelected ? (isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
+                      className={`p-4 rounded-2xl border flex items-center gap-3 transition-colors ${isSelected ? (isOled ? 'bg-indigo-900/20 border-indigo-500/50' : isDarkMode ? 'bg-indigo-900/30 border-indigo-500/60' : 'bg-indigo-50 border-indigo-300') : (isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200')}`}
                     >
                       <input
                         type="checkbox"
@@ -2030,7 +2101,7 @@ export default function App() {
               savedParagraphs.length === 0
                 ? <p className="text-center py-8 text-slate-500 text-sm">No saved paragraphs yet.</p>
                 : savedParagraphs.map(p => (
-                  <div key={p.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                  <div key={p.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="min-w-0 flex-1 mr-3">
                       <div className="font-bold truncate">{p.name}</div>
                       <div className="text-xs text-slate-500">{new Date(p.created_at).toLocaleDateString()}</div>
@@ -2080,7 +2151,7 @@ export default function App() {
               savedConversations.length === 0
                 ? <p className="text-center py-8 text-slate-500 text-sm">No saved conversations yet.</p>
                 : savedConversations.map(c => (
-                  <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                  <div key={c.id} className={`p-4 rounded-2xl border flex items-center justify-between ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="min-w-0 flex-1 mr-3">
                       <div className="font-bold truncate">{c.name}</div>
                       <div className="text-xs text-slate-500">{new Date(c.created_at).toLocaleDateString()}</div>
@@ -2127,7 +2198,7 @@ export default function App() {
             )}
           </div>
 
-          <div className={`p-4 border-t space-y-2 ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+          <div className={`p-4 border-t space-y-2 ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
             {libraryTab === 'decks' && selectedDeckIds.size >= 2 && (
               <button
                 onClick={handleMixSelected}
@@ -2136,7 +2207,7 @@ export default function App() {
                 <Shuffle size={15} /> Mix Selected ({selectedDeckIds.size} decks · {[...selectedDeckIds].reduce((sum, id) => sum + (savedDecks.find(d => d.id === id)?.card_count || 0), 0)} cards)
               </button>
             )}
-            <button onClick={() => fileInputRef.current.click()} className={`w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
+            <button onClick={() => fileInputRef.current.click()} className={`w-full py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-colors ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:bg-indigo-600 hover:text-white hover:border-indigo-600' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
               <Upload size={15} /> Upload {libraryTab === 'decks' ? 'Flashcards' : libraryTab === 'paragraphs' ? 'Paragraph' : 'Conversation'}
             </button>
           </div>
@@ -2206,9 +2277,9 @@ export default function App() {
               <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Paragraph Length</label>
               <div className="grid grid-cols-3 gap-3">
                 {[
-                  { key: 'short', label: 'Short', desc: '50-80 words' },
-                  { key: 'medium', label: 'Medium', desc: '80-120 words' },
-                  { key: 'long', label: 'Long', desc: '120-160 words' }
+                  { key: 'short', label: 'Short', desc: '80-120 words' },
+                  { key: 'medium', label: 'Medium', desc: '350-400 words' },
+                  { key: 'long', label: 'Long', desc: '650-700 words' }
                 ].map(({ key, label, desc }) => (
                   <button key={key} onClick={() => setParagraphConfig(c => ({...c, length: key}))}
                     className={`py-3 rounded-xl font-bold border-2 transition-all text-center ${paragraphConfig.length === key ? 'border-emerald-500 bg-emerald-500/10 text-emerald-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
@@ -2306,7 +2377,7 @@ export default function App() {
 
             <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm flex gap-3">
               <AlertCircle className="shrink-0" />
-              <p>Generates a custom paragraph using AI based on your settings. {paragraphConfig.includeQuestions ? 'Includes 3-5 comprehension questions. ' : ''}Takes ~10-15 seconds.</p>
+              <p>Generates a custom paragraph using AI based on your settings. {paragraphConfig.includeQuestions ? `Includes ${{ short: 3, medium: 5, long: 10 }[paragraphConfig.length]} comprehension questions. ` : ''}Takes ~10-15 seconds.</p>
             </div>
 
             <button onClick={startParagraphGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
@@ -2316,7 +2387,7 @@ export default function App() {
             {authToken && (
               <button
                 onClick={() => { loadLibrary(); setLibraryTab('paragraphs'); setShowLibrary(true); }}
-                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isOled ? 'border-zinc-800 text-zinc-300 hover:border-indigo-500 hover:text-indigo-400' : isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
               >
                 <Library size={18} /> Load From Library
               </button>
@@ -2501,7 +2572,7 @@ export default function App() {
             {authToken && (
               <button
                 onClick={() => { loadLibrary(); setLibraryTab('conversations'); setShowLibrary(true); }}
-                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isOled ? 'border-zinc-800 text-zinc-300 hover:border-indigo-500 hover:text-indigo-400' : isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
               >
                 <Library size={18} /> Load From Library
               </button>
@@ -2523,7 +2594,7 @@ export default function App() {
           <Loader2 size={80} className="animate-spin text-indigo-500" />
           <Sparkles className="absolute top-0 right-0 text-amber-400 animate-pulse" />
         </div>
-        <h3 className="text-3xl font-black mb-4">Generating Conversation</h3>
+        <h3 className="text-3xl font-black mb-4">{conversationLoadingStatus.startsWith('Preparing audio') ? 'Preparing Playback' : 'Generating Conversation'}</h3>
         <p className="text-slate-500 font-medium animate-pulse">{conversationLoadingStatus}</p>
       </div>
     );
@@ -2540,7 +2611,7 @@ export default function App() {
 
         <main className="w-full max-w-4xl flex-1 flex flex-col justify-center">
           <div className="w-full max-w-4xl flex flex-col gap-6 mb-4">
-            <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+            <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
               <div className="text-center">
                 <h2 className="text-2xl font-black text-indigo-600 mb-2">Listening Conversation</h2>
                 <p className="text-sm text-slate-500">
@@ -2558,7 +2629,7 @@ export default function App() {
                   return (
                     <div key={`${turn.speaker}-${index}`} className={`flex ${isLeft ? 'justify-start' : 'justify-end'}`}>
                       <div className={`max-w-[80%] rounded-2xl p-4 border ${isLeft
-                        ? isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'
+                        ? isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'
                         : 'bg-indigo-600 text-white border-indigo-500'}`}>
                         <div className="flex items-center justify-between gap-3 mb-1">
                           <span className={`text-xs font-bold uppercase tracking-wider ${isLeft ? 'text-indigo-500' : 'text-white/80'}`}>
@@ -2566,7 +2637,7 @@ export default function App() {
                           </span>
                           <button
                             onClick={() => playConversationTurn(turn, index)}
-                            className={`p-1.5 rounded-lg ${isLeft ? isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-white text-slate-600 hover:text-indigo-600' : 'bg-white/15 text-white hover:bg-white/25'}`}
+                            className={`p-1.5 rounded-lg ${isLeft ? isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-white text-slate-600 hover:text-indigo-600' : 'bg-white/15 text-white hover:bg-white/25'}`}
                             title="Play dialogue"
                           >
                             {isPlaying ? <Loader2 size={14} className="animate-spin" /> : <Volume2 size={14} />}
@@ -2576,7 +2647,7 @@ export default function App() {
                           <button
                             onClick={() => setRevealedConversationTurns(prev => ({ ...prev, [index]: !prev[index] }))}
                             className={`text-xs px-2 py-0.5 rounded-lg border transition-colors ${isLeft
-                              ? isDarkMode ? 'bg-slate-700 border-slate-600 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-500 hover:text-indigo-600'
+                              ? isOled ? 'bg-black border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-700 border-slate-600 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-500 hover:text-indigo-600'
                               : 'bg-white/15 border-white/30 text-white/80 hover:bg-white/25'}`}
                           >
                             {revealedConversationTurns[index] ? 'Hide' : 'Show text'}
@@ -2614,7 +2685,7 @@ export default function App() {
 
             {conversationComplete && conversationData?.questions && conversationData.questions.length > 0 && (
               <div className="w-full max-w-4xl mt-2">
-                <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
                   <div className="text-center mb-6">
                     <h3 className="text-xl font-black text-indigo-600 mb-2">Listening Questions</h3>
                     <p className="text-sm text-slate-500">Answer after listening to the full conversation</p>
@@ -2632,12 +2703,12 @@ export default function App() {
                       const translationVisible = !!conversationVisibleTranslations[qIndex];
 
                       return (
-                        <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
+                        <div key={qIndex} className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
                           <div className="flex items-start justify-between gap-3 mb-2">
                             <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
                             <button
                               onClick={() => setConversationVisibleTranslations(prev => ({ ...prev, [qIndex]: !prev[qIndex] }))}
-                              className={`p-2 rounded-lg border transition-colors ${isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
+                              className={`p-2 rounded-lg border transition-colors ${isOled ? 'bg-black border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
                               title={translationVisible ? 'Hide translations' : 'Show translations'}
                             >
                               {translationVisible ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -2654,7 +2725,7 @@ export default function App() {
                               const isCorrectOption = optionLetter === normalizedCorrect;
                               const showCorrectness = hasAnswered;
 
-                              let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+                              let optionClass = isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
                               if (showCorrectness) {
                                 if (isCorrectOption) optionClass = 'bg-emerald-500/20 border-emerald-500';
                                 else if (isSelected && !isCorrectOption) optionClass = 'bg-red-500/20 border-red-500';
@@ -2721,7 +2792,12 @@ export default function App() {
               )}
 
               <button
-                onClick={() => setAppMode('conversation-setup')}
+                onClick={() => {
+                  // Revoke cached blob URLs to free memory.
+                  Object.values(conversationAudioCacheRef.current).flat().forEach(url => { if (url) URL.revokeObjectURL(url); });
+                  conversationAudioCacheRef.current = {};
+                  setAppMode('conversation-setup');
+                }}
                 className="px-8 py-4 rounded-xl bg-slate-600 hover:bg-slate-500 text-white font-bold transition-all shadow-lg shadow-slate-500/20 active:scale-95"
               >
                 New Conversation
@@ -2754,7 +2830,7 @@ export default function App() {
             <div className="w-full max-w-4xl flex flex-col gap-6 mb-4">
                 
                 {/* Paragraph Display */}
-                <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                <div className={`p-8 rounded-[2.5rem] shadow-2xl relative flex flex-col gap-6 ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
                   
                   {/* Title */}
                   <div className="text-center">
@@ -2834,7 +2910,7 @@ export default function App() {
                   {/* Pinyin Display */}
                   {showPinyin && (
                     <div className="animate-in fade-in slide-in-from-bottom-4">
-                      <div className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                      <div className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800 text-zinc-300' : isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
                         <span className="font-bold text-blue-500 block mb-1">Pinyin:</span>
                         <div className="text-lg leading-relaxed italic">{paragraphData?.pinyin || "Loading..."}</div>
                       </div>
@@ -2844,7 +2920,7 @@ export default function App() {
                   {/* English Translation Display */}
                   {showEnglish && (
                     <div className="animate-in fade-in slide-in-from-bottom-4">
-                      <div className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                      <div className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800 text-zinc-300' : isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
                         <span className="font-bold text-green-500 block mb-1">English Translation:</span>
                         <div className="text-lg leading-relaxed">{paragraphData?.english || "Loading..."}</div>
                       </div>
@@ -2855,7 +2931,7 @@ export default function App() {
                 {/* Comprehension Questions */}
                 {paragraphData?.questions && paragraphData.questions.length > 0 && (
                   <div className="w-full max-w-4xl mt-6">
-                    <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
+                    <div className={`p-6 rounded-[2.5rem] shadow-2xl ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} border`}>
                       <div className="text-center mb-6">
                         <h3 className="text-xl font-black text-indigo-600 mb-2">Comprehension Questions</h3>
                         <p className="text-sm text-slate-500">Test your understanding of the paragraph</p>
@@ -2873,12 +2949,12 @@ export default function App() {
                           const translationVisible = !!visibleTranslations[qIndex];
                           
                           return (
-                            <div key={qIndex} className={`p-4 rounded-xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
+                            <div key={qIndex} className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-200'}`}>
                               <div className="flex items-start justify-between gap-3 mb-2">
                                 <div className="font-bold text-indigo-600">{qIndex + 1}. {question.question}</div>
                                 <button
                                   onClick={() => setVisibleTranslations(prev => ({ ...prev, [qIndex]: !prev[qIndex] }))}
-                                  className={`p-2 rounded-lg border transition-colors ${isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
+                                  className={`p-2 rounded-lg border transition-colors ${isOled ? 'bg-black border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-indigo-600'}`}
                                   title={translationVisible ? 'Hide translations' : 'Show translations'}
                                 >
                                   {translationVisible ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -2894,7 +2970,7 @@ export default function App() {
                                   const isCorrectOption = optionLetter === normalizedCorrect;
                                   const showCorrectness = hasAnswered;
                                   
-                                  let optionClass = isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
+                                  let optionClass = isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200';
                                   
                                   if (showCorrectness) {
                                     if (isCorrectOption) {
@@ -2987,7 +3063,7 @@ export default function App() {
         
         <div className={`max-w-md w-full p-8 rounded-[2.5rem] shadow-2xl text-center relative z-10 max-h-[90vh] flex flex-col ${cardBg}`}>
           
-          <div className={`mx-auto mb-4 w-20 h-20 rounded-full flex items-center justify-center ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'} ${emojiColor}`}>
+          <div className={`mx-auto mb-4 w-20 h-20 rounded-full flex items-center justify-center ${isOled ? 'bg-zinc-950 border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-100'} ${emojiColor}`}>
             <Emoji size={48} />
           </div>
 
@@ -3002,11 +3078,11 @@ export default function App() {
 
           {/* Time Stats */}
           <div className="grid grid-cols-2 gap-4 mb-6 w-full">
-            <div className={`p-4 rounded-2xl ${isDarkMode ? 'bg-slate-800' : 'bg-slate-50'}`}>
+            <div className={`p-4 rounded-2xl ${isOled ? 'bg-black border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-50'}`}>
                <div className="text-xs text-slate-500 uppercase font-bold flex items-center justify-center gap-1 mb-1"><Clock size={12}/> Total Time</div>
                <div className="text-xl font-black">{formatTime(sessionDuration)}</div>
             </div>
-            <div className={`p-4 rounded-2xl ${isDarkMode ? 'bg-slate-800' : 'bg-slate-50'}`}>
+            <div className={`p-4 rounded-2xl ${isOled ? 'bg-black border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-50'}`}>
                <div className="text-xs text-slate-500 uppercase font-bold mb-1">Avg / Card</div>
                <div className="text-xl font-black">{(sessionDuration / cards.length).toFixed(1)}s</div>
             </div>
@@ -3023,13 +3099,13 @@ export default function App() {
             )}
             <button
               onClick={() => setShowAllWords(true)}
-              className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-200' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
+              className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-2 transition-all ${isOled ? 'bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-200' : isDarkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-200' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
             >
               <ListChecks size={18} /> Select Custom Words
             </button>
             <button
               onClick={() => resetSession()}
-              className={`w-full py-4 rounded-xl font-bold transition-all ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'}`}
+              className={`w-full py-4 rounded-xl font-bold transition-all ${isOled ? 'bg-black border border-zinc-800 hover:border-zinc-700 text-zinc-500' : isDarkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'}`}
             >
               Restart Full Deck
             </button>
@@ -3071,7 +3147,7 @@ export default function App() {
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
-        <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl border ${isDarkMode ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+        <div className={`w-full max-w-md p-6 rounded-3xl shadow-2xl border ${isOled ? 'bg-black border-zinc-800 text-white' : isDarkMode ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-xl font-black flex items-center gap-2">
               <Settings className="text-indigo-500" /> Settings
@@ -3082,7 +3158,7 @@ export default function App() {
           </div>
 
           {authToken && (
-            <div className={`flex items-center justify-between p-3 rounded-2xl mb-4 ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+            <div className={`flex items-center justify-between p-3 rounded-2xl mb-4 ${isOled ? 'bg-zinc-950 border border-zinc-800' : isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-white font-black text-sm">
                   {(authUser?.username?.[0] || '?').toUpperCase()}
@@ -3102,9 +3178,11 @@ export default function App() {
                 className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
                   soundEnabled
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500'
-                    : isDarkMode
-                      ? 'bg-slate-950 border-slate-700 text-slate-300 hover:text-white'
-                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-slate-900'
+                    : isOled
+                      ? 'bg-black border-zinc-800 text-zinc-300 hover:text-white'
+                      : isDarkMode
+                        ? 'bg-slate-950 border-slate-700 text-slate-300 hover:text-white'
+                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-slate-900'
                 }`}
                 title="Toggle sound effects"
               >
@@ -3113,16 +3191,18 @@ export default function App() {
               </button>
 
               <button
-                onClick={() => setIsDarkMode((prev) => !prev)}
+                onClick={cycleTheme}
                 className={`p-3 rounded-xl border transition-colors flex items-center justify-center gap-2 font-bold text-sm ${
-                  isDarkMode
-                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
-                    : 'bg-amber-500/10 border-amber-500/30 text-amber-600'
+                  isOled
+                    ? 'bg-black border-zinc-700 text-zinc-300'
+                    : isDarkMode
+                      ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-400'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-600'
                 }`}
-                title="Toggle app theme"
+                title="Cycle theme: Light → Dark → OLED"
               >
-                {isDarkMode ? <Moon size={16} /> : <Sun size={16} className="text-amber-500" />}
-                {isDarkMode ? 'Dark Mode' : 'Light Mode'}
+                {isOled ? <Smartphone size={16} /> : isDarkMode ? <Moon size={16} /> : <Sun size={16} className="text-amber-500" />}
+                {isOled ? 'OLED Mode' : isDarkMode ? 'Dark Mode' : 'Light Mode'}
               </button>
 
               <button
@@ -3153,7 +3233,7 @@ export default function App() {
                     value={value}
                     onChange={e => set(parseFloat(e.target.value))}
                     className="w-full h-2 rounded-lg appearance-none cursor-pointer"
-                    style={{ background: `linear-gradient(to right, #6366f1 0%, #6366f1 ${value * 100}%, ${isDarkMode ? '#374151' : '#e2e8f0'} ${value * 100}%, ${isDarkMode ? '#374151' : '#e2e8f0'} 100%)` }}
+                    style={{ background: `linear-gradient(to right, #6366f1 0%, #6366f1 ${value * 100}%, ${isOled ? '#09090b' : isDarkMode ? '#374151' : '#e2e8f0'} ${value * 100}%, ${isOled ? '#09090b' : isDarkMode ? '#374151' : '#e2e8f0'} 100%)` }}
                   />
                 </div>
               ))}
@@ -3161,7 +3241,7 @@ export default function App() {
 
             <div>
               <label className="block text-xs font-bold uppercase tracking-widest opacity-60 mb-2">Gemini API Key</label>
-              <div className={`flex items-center gap-2 p-3 rounded-xl border ${isDarkMode ? 'bg-slate-950 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+              <div className={`flex items-center gap-2 p-3 rounded-xl border ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-950 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                 <Key size={16} className="opacity-50" />
                 <input 
                   type="password"
@@ -3241,7 +3321,7 @@ export default function App() {
                 onChange={e => { setFlashcardSetupText(e.target.value); setFlashcardSetupError(''); }}
                 placeholder={`杯子, bēi zi, cup/glass\n麵包, miàn bāo, bread\n點心, diǎn xīn, snack/dessert\n\nFormat: character, pinyin, meaning\nOne card per line. Pinyin and meaning are optional.`}
                 rows={10}
-                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 font-mono resize-none ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-600' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400'}`}
+                className={`w-full px-4 py-3 rounded-xl border text-sm outline-none transition-all focus:border-indigo-500 font-mono resize-none ${isOled ? 'bg-black border-zinc-800 text-white placeholder-zinc-700' : isDarkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-600' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400'}`}
               />
               {flashcardSetupError && (
                 <div className="mt-2 text-red-500 text-xs font-bold flex items-center gap-1">
@@ -3266,7 +3346,7 @@ export default function App() {
             {authToken && (
               <button
                 onClick={() => { loadLibrary(); setLibraryTab('decks'); setShowLibrary(true); }}
-                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
+                className={`w-full py-4 rounded-xl font-black border-2 transition-all flex items-center justify-center gap-2 ${isOled ? 'border-zinc-800 text-zinc-300 hover:border-indigo-500 hover:text-indigo-400' : isDarkMode ? 'border-slate-700 text-slate-300 hover:border-indigo-500 hover:text-indigo-400' : 'border-slate-200 text-slate-600 hover:border-indigo-500 hover:text-indigo-600'}`}
               >
                 <Library size={18} /> Load From Library
               </button>
@@ -3275,7 +3355,7 @@ export default function App() {
             {cards.length > 0 && (
               <button
                 onClick={() => setAppMode('flashcards')}
-                className={`w-full py-3 rounded-xl font-bold transition-all text-sm ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                className={`w-full py-3 rounded-xl font-bold transition-all text-sm ${isOled ? 'bg-black border border-zinc-800 text-zinc-400 hover:bg-zinc-900' : isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
               >
                 Continue Current Session ({cards.length} cards)
               </button>
@@ -3326,7 +3406,7 @@ export default function App() {
                 cardStatuses[i] === 'correct' ? 'bg-emerald-500' :
                 cardStatuses[i] === 'wrong' ? 'bg-red-500' :
                 cardStatuses[i] === 'missed' ? 'bg-yellow-500' :
-                'bg-slate-200 dark:bg-slate-700'
+                isOled ? 'bg-zinc-900' : 'bg-slate-200 dark:bg-slate-700'
               }`} />
             ))}
           </div>
@@ -3353,7 +3433,7 @@ export default function App() {
           <div className={`relative w-full h-full transition-all duration-500 preserve-3d cursor-pointer ${isFlipped ? 'rotate-y-180' : ''}`}>
             
             {/* Front - Text size increased to 9xl */}
-            <div className={`absolute inset-0 backface-hidden rounded-[2.5rem] border-2 flex flex-col items-center justify-center p-8 shadow-2xl ${cardBg} ${isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            <div className={`absolute inset-0 backface-hidden rounded-[2.5rem] border-2 flex flex-col items-center justify-center p-8 shadow-2xl ${cardBg} ${isOled ? 'border-zinc-800' : isDarkMode ? 'border-slate-800' : 'border-slate-100'}`}>
               <span className="absolute top-8 text-sm font-bold tracking-widest text-slate-400">CARD {currentIndex + 1}</span>
               <h2 className="text-[7rem] leading-none font-black text-center flex items-center justify-center h-full pb-4">{currentCard.char}</h2>
               <div className="absolute bottom-8 flex items-center gap-2 text-indigo-500 text-xs font-bold uppercase tracking-widest">
@@ -3362,13 +3442,13 @@ export default function App() {
               </div>
               <button 
                 onClick={(e) => { e.stopPropagation(); copyToClipboard(currentCard.char); }}
-                className={`absolute top-6 left-6 p-3 rounded-xl transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-400 hover:text-indigo-500'}`}
+                className={`absolute top-6 left-6 p-3 rounded-xl transition-all ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-400 hover:text-indigo-500'}`}
               >
                 <Copy size={24} />
               </button>
               <button 
                 onClick={(e) => { e.stopPropagation(); handleTTS(currentCard.char); }}
-                className={`absolute top-6 right-6 p-3 rounded-xl transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-400 hover:text-indigo-500'}`}
+                className={`absolute top-6 right-6 p-3 rounded-xl transition-all ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-400 hover:text-indigo-500'}`}
               >
                 <Volume2 size={24} />
               </button>
@@ -3427,7 +3507,7 @@ export default function App() {
           )}
 
           {!isOfflineMode && (
-            <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
+            <button onClick={() => setShowChat(true)} className={`flex-1 rounded-2xl font-bold flex items-center justify-center gap-2 transition-all ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:bg-indigo-600 hover:text-white hover:border-indigo-600' : isDarkMode ? 'bg-slate-800 text-slate-300 hover:bg-indigo-600 hover:text-white' : 'bg-slate-200 text-slate-600 hover:bg-indigo-600 hover:text-white'}`}>
               <MessageCircle size={20} /> <span className="hidden sm:inline">Ask AI</span>
             </button>
           )}
@@ -3435,7 +3515,7 @@ export default function App() {
 
         {/* AI Context Section */}
         {!isOfflineMode && (
-        <div className={`rounded-[2rem] p-6 mb-6 transition-all border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+        <div className={`rounded-[2rem] p-6 mb-6 transition-all border ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
           <div className="flex justify-between items-center mb-4">
             <div className="flex items-center gap-2 text-indigo-500 text-xs font-black tracking-widest">
               <Sparkles size={14} /> CONTEXT LAB
@@ -3443,7 +3523,7 @@ export default function App() {
             <button 
               onClick={generateSmartSentence} 
               disabled={isGenerating}
-              className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-100 text-slate-400'}`}
+              className={`p-2 rounded-lg transition-colors ${isOled ? 'hover:bg-zinc-900 text-zinc-500' : isDarkMode ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-100 text-slate-400'}`}
             >
               {isGenerating ? <Loader2 className="animate-spin" size={18} /> : <RefreshCw size={18} />}
             </button>
@@ -3454,17 +3534,17 @@ export default function App() {
                <div className="flex justify-between items-start mb-2">
                  <p className="text-2xl font-bold pr-2">{aiSentence.chinese}</p>
                  <div className="flex gap-2">
-                   <button onClick={() => handleTTS(aiSentence.chinese)} className={`p-2 rounded-lg ${isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-indigo-600'}`}>
+                   <button onClick={() => handleTTS(aiSentence.chinese)} className={`p-2 rounded-lg ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-indigo-600'}`}>
                       <Volume2 size={16} />
                    </button>
-                   <button onClick={() => setIsContextRevealed(!isContextRevealed)} className={`p-2 rounded-lg ${isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-indigo-600'}`}>
+                   <button onClick={() => setIsContextRevealed(!isContextRevealed)} className={`p-2 rounded-lg ${isOled ? 'bg-black border border-zinc-800 text-zinc-300 hover:text-white' : isDarkMode ? 'bg-slate-700 text-slate-300 hover:text-white' : 'bg-slate-100 text-slate-500 hover:text-indigo-600'}`}>
                       {isContextRevealed ? <EyeOff size={16} /> : <Eye size={16} />}
                    </button>
                  </div>
                </div>
                
                {isContextRevealed && (
-                 <div className={`p-3 rounded-xl border mt-3 ${isDarkMode ? 'bg-slate-900/50 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
+                 <div className={`p-3 rounded-xl border mt-3 ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900/50 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
                     <p className="text-sm font-bold text-indigo-500 mb-1">{aiSentence.pinyin}</p>
                     <p className="text-sm text-slate-500 italic">{aiSentence.english}</p>
                  </div>
@@ -3480,8 +3560,8 @@ export default function App() {
       {/* Chat Modal */}
       {showChat && !isOfflineMode && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-slate-950/60 backdrop-blur-sm animate-in fade-in">
-          <div className={`w-full max-w-lg h-[80vh] rounded-[2.5rem] flex flex-col overflow-hidden shadow-2xl ${isDarkMode ? 'bg-slate-900' : 'bg-white'}`}>
-            <div className={`p-6 border-b flex justify-between items-center ${isDarkMode ? 'bg-slate-900/50 border-slate-800' : 'bg-slate-50/50 border-slate-100'}`}>
+          <div className={`w-full max-w-lg h-[80vh] rounded-[2.5rem] flex flex-col overflow-hidden shadow-2xl ${isOled ? 'bg-black' : isDarkMode ? 'bg-slate-900' : 'bg-white'}`}>
+            <div className={`p-6 border-b flex justify-between items-center ${isOled ? 'bg-black border-zinc-800' : isDarkMode ? 'bg-slate-900/50 border-slate-800' : 'bg-slate-50/50 border-slate-100'}`}>
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600">
                   <BrainCircuit size={20} />
@@ -3491,15 +3571,15 @@ export default function App() {
                   <p className="text-xs text-slate-500">Discussing "{currentCard.char}"</p>
                 </div>
               </div>
-              <button onClick={() => setShowChat(false)} className={`p-2 rounded-full transition-colors ${isDarkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}><X size={20}/></button>
+              <button onClick={() => setShowChat(false)} className={`p-2 rounded-full transition-colors ${isOled ? 'hover:bg-zinc-900 text-zinc-400' : isDarkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}><X size={20}/></button>
             </div>
 
             <div ref={chatScrollRef} tabIndex={-1} className="flex-1 overflow-y-auto p-6 space-y-4 outline-none">
                {chatMessages.length === 0 && (
                  <div className="grid grid-cols-2 gap-2 mt-8">
                    {CHAT_QUICK_PROMPTS.map((q, i) => (
-                     <button key={q} onClick={() => handleChat(q)} className={`p-3 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-2 ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
-                       <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{i + 1}</span>
+                     <button key={q} onClick={() => handleChat(q)} className={`p-3 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-2 ${isOled ? 'bg-black border border-zinc-800 text-zinc-400 hover:bg-indigo-600 hover:text-white hover:border-indigo-600' : isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
+                       <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isOled ? 'bg-zinc-900 text-zinc-500' : isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{i + 1}</span>
                        {q}
                      </button>
                    ))}
@@ -3512,15 +3592,15 @@ export default function App() {
                  return (
                    <div key={i}>
                      <div className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                       <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${m.role === 'user' ? 'bg-indigo-600 text-white' : isDarkMode ? 'bg-slate-800 text-slate-200' : 'bg-slate-100 text-slate-800'}`}>
+                       <div className={`max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed ${m.role === 'user' ? 'bg-indigo-600 text-white' : isOled ? 'bg-zinc-950 text-zinc-200' : isDarkMode ? 'bg-slate-800 text-slate-200' : 'bg-slate-100 text-slate-800'}`}>
                          <FormattedText text={m.text} isUser={m.role === 'user'} />
                        </div>
                      </div>
                      {isLastAi && !isChatting && (
                        <div className="grid grid-cols-2 gap-1.5 mt-2">
                          {followups.map((q, qi) => (
-                           <button key={q} onClick={() => handleChat(q)} className={`p-2 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-1.5 ${isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
-                             <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{qi + 1}</span>
+                           <button key={q} onClick={() => handleChat(q)} className={`p-2 text-xs font-bold rounded-xl transition-colors text-left flex items-start gap-1.5 ${isOled ? 'bg-black border border-zinc-800 text-zinc-400 hover:bg-indigo-600 hover:text-white hover:border-indigo-600' : isDarkMode ? 'bg-slate-800 text-slate-400 hover:bg-indigo-600 hover:text-white' : 'bg-slate-100 text-slate-500 hover:bg-indigo-600 hover:text-white'}`}>
+                             <span className={`shrink-0 w-4 h-4 rounded text-[10px] font-black flex items-center justify-center mt-0.5 ${isOled ? 'bg-zinc-900 text-zinc-500' : isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{qi + 1}</span>
                              {q}
                            </button>
                          ))}
@@ -3532,13 +3612,13 @@ export default function App() {
                {isChatting && <div className="flex gap-1 p-4"><span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"/></div>}
             </div>
 
-            <div className={`p-4 border-t flex gap-2 ${isDarkMode ? 'border-slate-800 bg-slate-900/50' : 'border-slate-100 bg-slate-50/50'}`}>
+            <div className={`p-4 border-t flex gap-2 ${isOled ? 'border-zinc-800 bg-black' : isDarkMode ? 'border-slate-800 bg-slate-900/50' : 'border-slate-100 bg-slate-50/50'}`}>
               <input 
                 value={chatInput}
                 onChange={e => setChatInput(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleChat()}
                 placeholder="Ask anything..."
-                className={`flex-1 rounded-xl px-4 text-sm outline-none border transition-all ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-white border-slate-200 text-slate-900 focus:border-indigo-500'}`}
+                className={`flex-1 rounded-xl px-4 text-sm outline-none border transition-all ${isOled ? 'bg-black border-zinc-800 text-white focus:border-indigo-500' : isDarkMode ? 'bg-slate-800 border-slate-700 text-white focus:border-indigo-500' : 'bg-white border-slate-200 text-slate-900 focus:border-indigo-500'}`}
               />
               <button onClick={() => handleChat()} className="p-3 bg-indigo-600 rounded-xl text-white hover:bg-indigo-500 transition-colors"><Send size={20}/></button>
             </div>
