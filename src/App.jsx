@@ -404,6 +404,8 @@ export default function App() {
   const [paragraphLoadingStatus, setParagraphLoadingStatus] = useState("");
   const [showPinyin, setShowPinyin] = useState(false);
   const [showEnglish, setShowEnglish] = useState(false);
+  const [pinyinLoading, setPinyinLoading] = useState(false);
+  const [englishLoading, setEnglishLoading] = useState(false);
   const [highlightWords, setHighlightWords] = useState(false);
   const [questionAnswers, setQuestionAnswers] = useState({});
   const [visibleTranslations, setVisibleTranslations] = useState({}); // Track which translations are visible
@@ -1332,28 +1334,29 @@ export default function App() {
     }
 
     const lengthMap = {
-      'short': '80-120 words',
-      'medium': '350-400 words',
-      'long': '650-700 words'
+      'short': { min: 230, max: 270 },
+      'medium': { min: 480, max: 520 },
+      'long': { min: 980, max: 1020 }
     };
+    const { min: wMin, max: wMax } = lengthMap[paragraphConfig.length];
 
     const questionCountMap = { 'short': 3, 'medium': 5, 'long': 10 };
     const questionCount = questionCountMap[paragraphConfig.length];
 
     const prompt = `task: TOCFL Band ${paragraphConfig.level} reading paragraph in Traditional Chinese
   topic: daily-life narrative
-  length: ${lengthMap[paragraphConfig.length]}
+  length: STRICTLY ${wMin}-${wMax} Chinese characters. Count carefully — do NOT stop early. The paragraph must contain at least ${wMin} characters.
   ${vocabContext ? `${vocabContext}\n` : ''}output: ${paragraphConfig.includeQuestions
       ? `json {paragraph, questions[exactly ${questionCount}]{question, question_english, options[3], options_english[3], correct_answer, explanation}}`
       : 'text paragraph only'}`;
-    
+
     try {
       const response = await callGemini(
-        prompt, 
+        prompt,
         paragraphConfig.includeQuestions
-          ? "Generate natural TOCFL content in zh-Hant. Return strict JSON only."
-          : "Generate natural TOCFL content in zh-Hant. Return only the paragraph text.", 
-        effectiveKey, 
+          ? `Generate natural TOCFL content in zh-Hant. The paragraph field must be ${wMin}-${wMax} Chinese characters — count precisely. Return strict JSON only.`
+          : `Generate natural TOCFL content in zh-Hant. The paragraph must be ${wMin}-${wMax} Chinese characters — count precisely and do not stop early. Return only the paragraph text.`,
+        effectiveKey,
         paragraphConfig.includeQuestions ? "application/json" : "text/plain"
       );
       
@@ -1375,18 +1378,10 @@ export default function App() {
       
       if (!paragraphData.chinese) { throw new Error("No paragraph generated"); }
 
-      // Generate pinyin and English translation
-      setParagraphLoadingStatus("Generating translations...");
-      const translationPrompt = `Convert zh-Hant paragraph to JSON only: {"pinyin":"...","english":"..."}\nparagraph:${paragraphData.chinese}`;
-      
-      const translationData = await callGemini(translationPrompt, "Return valid JSON only.", effectiveKey, "application/json");
-      const cleanedTranslation = translationData.replace(/```json|```/g, '').trim();
-      const translations = JSON.parse(cleanedTranslation);
-
       setParagraphData({
         chinese: paragraphData.chinese,
-        pinyin: translations.pinyin,
-        english: translations.english,
+        pinyin: null,
+        english: null,
         questions: paragraphData.questions || [],
         words: cards.map(c => c.char) // Store the flashcard words for highlighting
       });
@@ -1396,6 +1391,46 @@ export default function App() {
       console.error("Paragraph Generation Failed:", e);
       setParagraphLoadingStatus(`Error: ${e.message}`);
       setTimeout(() => setAppMode('flashcards'), 2000);
+    }
+  };
+
+  // On-demand pinyin fetch: uses Gemini to convert zh-Hant to pinyin romanization.
+  const fetchPinyinOnDemand = async () => {
+    if (!paragraphData?.chinese || paragraphData.pinyin) return;
+    setPinyinLoading(true);
+    try {
+      const p = `Convert every Chinese character in the following Traditional Chinese text to pinyin romanization with tone marks (e.g. nǐ hǎo). Output only the pinyin, preserving punctuation and line breaks. Do not output any Chinese characters.\n\n${paragraphData.chinese}`;
+      const pinyin = await callGemini(p, "Return only pinyin romanization with tone marks. No Chinese characters.", effectiveKey, "text/plain");
+      setParagraphData(prev => ({ ...prev, pinyin: pinyin.trim() }));
+    } catch {
+      setParagraphData(prev => ({ ...prev, pinyin: '(Pinyin unavailable)' }));
+    } finally {
+      setPinyinLoading(false);
+    }
+  };
+
+  // On-demand English fetch: tries Google Translate, falls back to Gemini.
+  const fetchEnglishOnDemand = async () => {
+    if (!paragraphData?.chinese || paragraphData.english) return;
+    setEnglishLoading(true);
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=zh-TW&tl=en&dt=t&q=${encodeURIComponent(paragraphData.chinese)}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const english = data[0].map(seg => seg[0]).join(' ').trim();
+      if (!english) throw new Error('empty');
+      setParagraphData(prev => ({ ...prev, english }));
+    } catch {
+      // Fallback to Gemini
+      try {
+        const p = `Translate this Traditional Chinese paragraph to English only. Return just the English translation:\n${paragraphData.chinese}`;
+        const english = await callGemini(p, "Return only the English translation, no other text.", effectiveKey, "text/plain");
+        setParagraphData(prev => ({ ...prev, english: english.trim() }));
+      } catch {
+        setParagraphData(prev => ({ ...prev, english: '(Translation unavailable)' }));
+      }
+    } finally {
+      setEnglishLoading(false);
     }
   };
 
@@ -1568,7 +1603,7 @@ export default function App() {
           return null; // network/CORS miss → fall back to live URL on play
         }
       }));
-      cache[i] = blobUrls;
+      cache[i] = blobUrls.filter(Boolean);
     }
     conversationAudioCacheRef.current = cache;
   };
@@ -1578,10 +1613,10 @@ export default function App() {
     setPlayingTurnIndex(index);
     try {
       const cachedUrls = conversationAudioCacheRef.current[index];
-      if (cachedUrls?.length) {
+      const validCachedUrls = Array.isArray(cachedUrls) ? cachedUrls.filter(Boolean) : [];
+      if (validCachedUrls.length) {
         // Play pre-fetched blobs sequentially for instant, lag-free playback.
-        for (const blobUrl of cachedUrls) {
-          if (!blobUrl) continue;
+        for (const blobUrl of validCachedUrls) {
           // eslint-disable-next-line no-await-in-loop
           await new Promise((resolve, reject) => {
             const audio = new Audio(blobUrl);
@@ -2277,9 +2312,9 @@ export default function App() {
               <label className="text-xs font-bold uppercase tracking-widest opacity-60 mb-2 block">Paragraph Length</label>
               <div className="grid grid-cols-3 gap-3">
                 {[
-                  { key: 'short', label: 'Short', desc: '80-120 words' },
-                  { key: 'medium', label: 'Medium', desc: '350-400 words' },
-                  { key: 'long', label: 'Long', desc: '650-700 words' }
+                  { key: 'short', label: 'Short', desc: '~250 chars' },
+                  { key: 'medium', label: 'Medium', desc: '~500 chars' },
+                  { key: 'long', label: 'Long', desc: '~1000 chars' }
                 ].map(({ key, label, desc }) => (
                   <button key={key} onClick={() => setParagraphConfig(c => ({...c, length: key}))}
                     className={`py-3 rounded-xl font-bold border-2 transition-all text-center ${paragraphConfig.length === key ? 'border-emerald-500 bg-emerald-500/10 text-emerald-500' : 'border-transparent bg-slate-800 text-slate-500'}`}>
@@ -2309,7 +2344,7 @@ export default function App() {
 
             {/* Vocabulary Familiarity Slider - Only show when using current deck and enough flashcards */}
             {paragraphConfig.useCurrentDeck && (() => {
-              const minFlashcards = { short: 50, medium: 80, long: 120 }[paragraphConfig.length];
+              const minFlashcards = { short: 50, medium: 100, long: 150 }[paragraphConfig.length];
               const hasEnoughFlashcards = cards.length >= minFlashcards;
               
               return hasEnoughFlashcards ? (
@@ -2377,7 +2412,7 @@ export default function App() {
 
             <div className="bg-amber-500/10 p-4 rounded-xl border border-amber-500/20 text-amber-500 text-sm flex gap-3">
               <AlertCircle className="shrink-0" />
-              <p>Generates a custom paragraph using AI based on your settings. {paragraphConfig.includeQuestions ? `Includes ${{ short: 3, medium: 5, long: 10 }[paragraphConfig.length]} comprehension questions. ` : ''}Takes ~10-15 seconds.</p>
+              <p>Generates a custom paragraph using AI based on your settings. {paragraphConfig.includeQuestions ? `Includes ${{ short: 3, medium: 5, long: 10 }[paragraphConfig.length]} comprehension questions. ` : ''}Pinyin and translation load on demand.</p>
             </div>
 
             <button onClick={startParagraphGeneration} className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black shadow-lg shadow-indigo-500/25 active:scale-95 transition-all">
@@ -2853,28 +2888,30 @@ export default function App() {
 
                   {/* Control Buttons */}
                   <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                    <button 
-                      onClick={() => setShowPinyin(!showPinyin)}
+                    <button
+                      onClick={() => { if (!showPinyin && !paragraphData?.pinyin) fetchPinyinOnDemand(); setShowPinyin(!showPinyin); }}
+                      disabled={pinyinLoading}
                       className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
-                        showPinyin 
-                          ? 'bg-blue-600 text-white' 
+                        showPinyin
+                          ? 'bg-blue-600 text-white'
                           : 'bg-blue-100 text-blue-600 hover:bg-blue-200'
-                      }`}
+                      } disabled:opacity-60`}
                     >
                       <Volume2 size={20} />
-                      {showPinyin ? 'Hide Pinyin' : 'Show Pinyin'}
+                      {pinyinLoading ? 'Loading…' : showPinyin ? 'Hide Pinyin' : 'Show Pinyin'}
                     </button>
 
-                    <button 
-                      onClick={() => setShowEnglish(!showEnglish)}
+                    <button
+                      onClick={() => { if (!showEnglish && !paragraphData?.english) fetchEnglishOnDemand(); setShowEnglish(!showEnglish); }}
+                      disabled={englishLoading}
                       className={`px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 ${
-                        showEnglish 
-                          ? 'bg-green-600 text-white' 
+                        showEnglish
+                          ? 'bg-green-600 text-white'
                           : 'bg-green-100 text-green-600 hover:bg-green-200'
-                      }`}
+                      } disabled:opacity-60`}
                     >
                       <Eye size={20} />
-                      {showEnglish ? 'Hide Translation' : 'Show Translation'}
+                      {englishLoading ? 'Loading…' : showEnglish ? 'Hide Translation' : 'Show Translation'}
                     </button>
 
                     <button 
@@ -2889,22 +2926,6 @@ export default function App() {
                       {highlightWords ? 'Hide Vocabulary' : 'Highlight Vocabulary'}
                     </button>
 
-                    <button
-                      onClick={downloadParagraphSnapshot}
-                      className="px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 bg-indigo-600 text-white hover:bg-indigo-500"
-                    >
-                      <Download size={20} />
-                      Save Offline
-                    </button>
-                    {authToken && (
-                      <button
-                        onClick={() => { setShowSavePrompt('paragraph'); setSaveName(''); }}
-                        className="px-6 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 bg-emerald-600 text-white hover:bg-emerald-500"
-                      >
-                        <Save size={20} />
-                        Save to Cloud
-                      </button>
-                    )}
                   </div>
 
                   {/* Pinyin Display */}
@@ -2912,7 +2933,9 @@ export default function App() {
                     <div className="animate-in fade-in slide-in-from-bottom-4">
                       <div className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800 text-zinc-300' : isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
                         <span className="font-bold text-blue-500 block mb-1">Pinyin:</span>
-                        <div className="text-lg leading-relaxed italic">{paragraphData?.pinyin || "Loading..."}</div>
+                        <div className="text-lg leading-relaxed italic">
+                          {pinyinLoading ? <span className="animate-pulse text-slate-400">Fetching pinyin…</span> : (paragraphData?.pinyin || '—')}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2922,7 +2945,9 @@ export default function App() {
                     <div className="animate-in fade-in slide-in-from-bottom-4">
                       <div className={`p-4 rounded-xl border ${isOled ? 'bg-black border-zinc-800 text-zinc-300' : isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
                         <span className="font-bold text-green-500 block mb-1">English Translation:</span>
-                        <div className="text-lg leading-relaxed">{paragraphData?.english || "Loading..."}</div>
+                        <div className="text-lg leading-relaxed">
+                          {englishLoading ? <span className="animate-pulse text-slate-400">Fetching translation…</span> : (paragraphData?.english || '—')}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -3023,20 +3048,38 @@ export default function App() {
                 )}
 
                 {/* Action Buttons */}
-                <div className="flex gap-4 justify-center">
-                  <button 
+                <div className="flex flex-wrap gap-4 justify-center">
+                  <button
                     onClick={() => setAppMode('paragraph-setup')}
                     className="px-8 py-4 rounded-xl bg-slate-600 hover:bg-slate-500 text-white font-bold transition-all shadow-lg shadow-slate-500/20 active:scale-95"
                   >
                     New Paragraph
                   </button>
-                  
-                  <button 
+
+                  <button
                     onClick={() => setAppMode('flashcards')}
                     className="px-8 py-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold transition-all shadow-lg shadow-indigo-500/25 active:scale-95"
                   >
                     Back to Flashcards
                   </button>
+
+                  <button
+                    onClick={downloadParagraphSnapshot}
+                    className="px-8 py-4 rounded-xl bg-slate-700 hover:bg-slate-600 text-white font-bold transition-all flex items-center gap-2 active:scale-95"
+                  >
+                    <Download size={18} />
+                    Save Offline
+                  </button>
+
+                  {authToken && (
+                    <button
+                      onClick={() => { setShowSavePrompt('paragraph'); setSaveName(''); }}
+                      className="px-8 py-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition-all flex items-center gap-2 active:scale-95"
+                    >
+                      <Save size={18} />
+                      Save to Cloud
+                    </button>
+                  )}
                 </div>
             </div>
         </main>
